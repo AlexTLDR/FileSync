@@ -23,27 +23,23 @@ to quickly create a Cobra application.`,
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("test cobra")
-		arguments := os.Args
-		if len(arguments) == 1 {
-			fmt.Println("Please give one argument.")
-			return
-		}
+		fmt.Println("valid location")
+	},
 
-		path := arguments[1]
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) != 1 {
+			return fmt.Errorf("accepts %d arg(s), received %d", 1, len(args))
+		}
+		path := args[0]
 
 		fileInfo, err := os.Stat(path)
 		if err != nil {
-			fmt.Println("Path does not exist!", err)
+			return fmt.Errorf("path does not exist! %v", err)
 		}
-
-		mode := fileInfo.Mode()
-		switch mode.IsDir() {
-		case true:
-			fmt.Println(path, "is a directory!")
-		case false:
-			fmt.Println(path, "is not a directory - and not a valid directory name!")
+		if !fileInfo.IsDir() {
+			return fmt.Errorf("path is not a directory")
 		}
+		return nil
 	},
 }
 
