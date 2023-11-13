@@ -6,6 +6,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 )
@@ -23,22 +24,24 @@ to quickly create a Cobra application.`,
 	// Uncomment the following line if your bare application
 	// has an action associated with it:
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("valid location")
+		fmt.Printf("\nvalid location\nscan complete\n")
 		return nil
 	},
 
 	Args: func(cmd *cobra.Command, args []string) error {
-		if len(args) != 1 {
-			return fmt.Errorf("accepts %d arg(s), received %d", 1, len(args))
+		if len(os.Args) < 2 {
+			fmt.Println("Usage: go run scanner.go <directory>")
+			os.Exit(1)
 		}
-		path := args[0]
 
-		fileInfo, err := os.Stat(path)
+		root := os.Args[1]
+
+		fmt.Println("Scanning directory:", root)
+
+		err := filepath.Walk(root, visitFile)
+
 		if err != nil {
-			return fmt.Errorf("path does not exist! %v", err)
-		}
-		if !fileInfo.IsDir() {
-			return fmt.Errorf("path is not a directory")
+			fmt.Println("Error:", err)
 		}
 		return nil
 	},
@@ -63,4 +66,17 @@ func init() {
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
 	rootCmd.Flags().BoolP("toggle", "t", false, "Help message for toggle")
+}
+
+func visitFile(path string, info os.FileInfo, err error) error {
+	if err != nil {
+		fmt.Println("Error:", err)
+		return nil
+	}
+
+	if !info.IsDir() {
+		fmt.Println("File:", path)
+	}
+
+	return nil
 }
