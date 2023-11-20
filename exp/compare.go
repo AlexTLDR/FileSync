@@ -14,7 +14,7 @@ func main() {
 	}
 	defer file1.Close()
 
-	file2, err := os.Open("/home/alex/Git/FileSync/go.mod")
+	file2, err := os.Open("/home/alex/Git/FileSync/test")
 	if err != nil {
 		log.Fatal(err)
 	}
