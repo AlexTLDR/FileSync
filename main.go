@@ -29,8 +29,10 @@ func syncDirs(srcDir, destDir string) error {
 		destPath := filepath.Join(destDir, relPath)
 
 		// Check if the destination file exists
-		if _, err := os.Stat(destPath); os.IsNotExist(err) {
-			// Create the destination file/directory if it doesn't exist
+		destInfo, err := os.Stat(destPath)
+		if os.IsNotExist(err) || info.ModTime().After(destInfo.ModTime()) {
+			// If the destination file doesn't exist or the source file is newer,
+			// create the destination file/directory
 			if info.IsDir() {
 				err = os.MkdirAll(destPath, 0755)
 			} else {
