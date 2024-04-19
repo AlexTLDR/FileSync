@@ -4,158 +4,168 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"time"
+	"log"
 
+	"cloud.google.com/go/storage"
 	"gocloud.dev/blob"
 	_ "gocloud.dev/blob/fileblob"
-	_ "gocloud.dev/blob/memblob"
+	_ "gocloud.dev/blob/gcsblob"
+	"google.golang.org/api/option"
 )
 
-func syncDirs(srcDir, destDir *blob.Bucket) error {
-
-	srcDirIt := srcDir.List(&blob.ListOptions{})
+func syncDirToBucket(dir, bucket *blob.Bucket) error {
+	bucketMap := make(map[string]*blob.ListObject)
+	dirMap := make(map[string]*blob.ListObject)
+	iter2 := bucket.List(nil)
 	for {
-		obj, err := srcDirIt.Next(context.Background())
-		if err != nil && err != io.EOF {
-			return err
-		}
-		if obj == nil {
+		obj, err := iter2.Next(context.Background())
+		if err == io.EOF {
 			break
 		}
-		fmt.Println(obj.Key)
-	}
-	/*
-		// Keep track of all files in the destination directory
-		destFiles := make(map[string]bool)
-		err := filepath.Walk(destDir, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-
-			if info.IsDir() {
-				return nil
-			}
-
-			relPath, err := filepath.Rel(destDir, path)
-			if err != nil {
-				return err
-			}
-
-			destFiles[relPath] = false
-			return nil
-		})
-
 		if err != nil {
 			return err
 		}
-
-		// Walk through the source directory
-		err = filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-
-			// Skip hidden files and directories
-			if info.Name()[0] == '.' {
-				return nil
-			}
-
-			// Get the relative path within the source directory
-			relPath, err := filepath.Rel(srcDir, path)
-			if err != nil {
-				return err
-			}
-
-			// Construct the destination path
-			destPath := filepath.Join(destDir, relPath)
-
-			// Check if the destination file exists
-			destInfo, err := os.Stat(destPath)
-			if os.IsNotExist(err) || info.ModTime().After(destInfo.ModTime()) {
-				// If the destination file doesn't exist or the source file is newer,
-				// create the destination file/directory
-				if info.IsDir() {
-					err = os.MkdirAll(destPath, 0755)
-				} else {
-					// Read the content
-					data, err := os.ReadFile(path)
-					if err != nil {
-						return err
-					}
-
-					// Write the content to the destination file
-					err = os.WriteFile(destPath, data, 0644)
-					if err != nil {
-						return err
-					}
-				}
-			}
-
-			// Mark the file as updated
-			destFiles[relPath] = true
-			return nil
-		})
-
+		bucketMap[obj.Key] = obj
+	}
+	iter1 := dir.List(nil)
+	for {
+		obj, err := iter1.Next(context.Background())
+		if err == io.EOF {
+			break
+		}
 		if err != nil {
-			return err	srcDirIt := srcDir.List(&blob.ListOptions{})
-			for {
-				obj, err := srcDirIt.Next(context.Background())
-				if err != nil && err != io.EOF {
-					return err
-				}
-				if obj == nil {
-					break
-				}
-				fmt.Println(obj.Key)
-			}
+			return err
 		}
+		dirMap[obj.Key] = obj
+	}
+	for _, obj := range dirMap {
+		fmt.Println(obj.Key, obj.Size, obj.ModTime, obj.MD5)
+	}
+	for _, obj := range bucketMap {
+		fmt.Println(obj.Key, obj.Size, obj.ModTime, obj.MD5)
+	}
+	// ctx := context.Background()
+	// for {
+	// 	// Walk through the local directory
+	// 	if err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	// 		if err != nil {
+	// 			return err
+	// 		}
 
-		// Delete files in the destination directory that weren't updated
-		for relPath, updated := range destFiles {
-			if !updated {
-				err = os.Remove(filepath.Join(destDir, relPath))
-				if err != nil {
-					return err
-				}
-			}
-		}
-	*/
+	// 		// Skip directories and hidden files
+	// 		if info.IsDir() || info.Name()[0] == '.' {
+	// 			return nil
+	// 		}
+
+	// 		// Get the relative path within the local directory
+	// 		relPath, err := filepath.Rel(dir, path)
+	// 		if err != nil {
+	// 			return err
+	// 		}
+
+	// 		// Check if the file exists in the bucket
+	// 		r, err := bucket.NewReader(ctx, relPath, nil)
+	// 		if err != nil {
+	// 			// If the file does not exist in the bucket, upload it
+	// 			// Open local file
+	// 			f, err := os.Open(path)
+	// 			if err != nil {
+	// 				return err
+	// 			}
+	// 			defer f.Close()
+
+	// 			// Write the local file to the bucket
+	// 			w, err := bucket.NewWriter(ctx, relPath, nil)
+	// 			if err != nil {
+	// 				return err
+	// 			}
+
+	// 			_, err = io.Copy(w, f)
+	// 			if err != nil {
+	// 				w.Close()
+	// 				return err
+	// 			}
+
+	// 			return w.Close()
+	// 		}
+
+	// 		// If the file exists in the bucket, check its modification time
+	// 		defer r.Close()
+
+	// 		var attrs storage.ObjectAttrs
+	// 		if r.As(&attrs) {
+	// 			// If the file in the bucket is newer, skip this file
+	// 			if attrs.Updated.After(info.ModTime()) {
+	// 				return nil
+	// 			}
+	// 		}
+
+	// 		// If the file in the bucket is older, upload the local file
+	// 		// Open local file
+	// 		f, err := os.Open(path)
+
+	// 		if err != nil {
+	// 			fmt.Println("Error syncing directory to bucket:", err)
+	// 		}
+	// 		if err != nil {
+	// 			return err
+	// 		}
+	// 		defer f.Close()
+
+	// 		// Write the local file to the bucket
+	// 		w, err := bucket.NewWriter(ctx, relPath, nil)
+	// 		if err != nil {
+	// 			return err
+	// 		}
+
+	// 		_, err = io.Copy(w, f)
+	// 		if err != nil {
+	// 			w.Close()
+	// 			return err
+	// 		}
+
+	// 		return w.Close()
+	// 	}); err != nil {
+
+	// 		return err
+	// 	}
+	// 	time.Sleep(1 * time.Second)
+	// }
 	return nil
-
 }
 
 func main() {
-	// Replace with your actual source and destination folder paths
-	// dir1 := "test-data/dir1"
-	//dir2 := "test-data/dir2"
 	ctx := context.Background()
+
+	// Replace with your actual local directory, credentials file path, and bucket name
+	// dir := "test-data/dir1"
+	credsFilePath := "key/filesync-415212-ecb8c3396d06.json"
+	// credsFilePath := "/home/alex/.config/gcloud/application_default_credentials.json"
+	bucketName := "gs://file-sync"
+
+	// Create a Google Cloud client with the credentials file
+	_, err := storage.NewClient(ctx, option.WithCredentialsFile(credsFilePath))
+	if err != nil {
+		log.Fatalf("Failed to create client: %v", err)
+	}
+
+	// Get a reference to the bucket
+	// bucket := client.Bucket(bucketName)
 	dir1, err := blob.OpenBucket(ctx, "file:///home/alex/git/FileSync/test-data/dir1")
 	if err != nil {
 		panic(err) //
 	}
 	defer dir1.Close()
-
-	dir2, err := blob.OpenBucket(ctx, "file:///home/alex/git/FileSync/test-data/dir2")
+	// Open the bucket
+	bucketHandle, err := blob.OpenBucket(ctx, bucketName)
 	if err != nil {
-		panic(err) //
+		panic(err)
 	}
-	defer dir2.Close()
+	defer bucketHandle.Close()
 
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			err := syncDirs(dir1, dir2)
-			if err != nil {
-				fmt.Println("Error syncing dir1 to dir2:", err)
-			}
-
-			err = syncDirs(dir2, dir1)
-			if err != nil {
-				fmt.Println("Error syncing dir2 to dir1:", err)
-			}
-		}
+	// Sync the local directory to the bucket
+	err = syncDirToBucket(dir1, bucketHandle)
+	if err != nil {
+		fmt.Println("Error syncing directory to bucket:", err)
 	}
 }
