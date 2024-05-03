@@ -15,10 +15,8 @@ import (
 	"google.golang.org/api/option"
 )
 
-func syncDirToBucket(dir *blob.Bucket, bucket *blob.Bucket) error {
-	ctx := context.Background()
-
-	// Create a map to store the local files
+func syncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket) error {
+	// Create a map to hold the local files
 	localFiles := make(map[string]blob.ListObject)
 
 	// Iterate over the local directory
@@ -62,7 +60,7 @@ func syncDirToBucket(dir *blob.Bucket, bucket *blob.Bucket) error {
 				}
 				// If the bucket file is newer, download it to the local directory
 			} else if obj.ModTime.After(localObj.ModTime) {
-				if err := downloadFile(ctx, dir, bucket, obj.Key); err != nil {
+				if err := downloadFile(ctx, bucket, obj.Key, "/home/alex/git/FileSync/test-data/dir1/"+obj.Key); err != nil {
 					return err
 				}
 			}
@@ -71,7 +69,7 @@ func syncDirToBucket(dir *blob.Bucket, bucket *blob.Bucket) error {
 			delete(localFiles, obj.Key)
 		} else {
 			// If the file only exists in the bucket, download it to the local directory
-			if err := downloadFile(ctx, dir, bucket, obj.Key); err != nil {
+			if err := downloadFile(ctx, bucket, obj.Key, "/home/alex/git/FileSync/test-data/dir1/"+obj.Key); err != nil {
 				return err
 			}
 		}
@@ -112,7 +110,7 @@ func uploadFile(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket, key 
 	return w.Close()
 }
 
-func downloadFile(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket, key string) error {
+func downloadFile(ctx context.Context, bucket *blob.Bucket, key string, destPath string) error {
 	// Open the bucket file
 	r, err := bucket.NewReader(ctx, key, nil)
 	if err != nil {
@@ -120,26 +118,22 @@ func downloadFile(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket, ke
 	}
 	defer r.Close()
 
-	// Create a writer for the local file
-	w, err := dir.NewWriter(ctx, key, nil)
+	// Create the destination file
+	destFile, err := os.Create(destPath)
 	if err != nil {
 		return err
 	}
+	defer destFile.Close()
 
-	// Copy the bucket file to the local directory
-	if _, err := io.Copy(w, r); err != nil {
-		w.Close()
+	// Copy the bucket file to the destination file
+	if _, err := io.Copy(destFile, r); err != nil {
 		return err
 	}
 
-	// Close the writer to commit the download
-	return w.Close()
+	return nil
 }
 func main() {
 	ctx := context.Background()
-
-	// Set the GO_BLOB_DEFAULT_BUFFER_DIR environment variable
-	os.Setenv("GO_BLOB_DEFAULT_BUFFER_DIR", "/home/alex/git/FileSync/test-data")
 
 	// Replace with your actual local directory, credentials file path, and bucket name
 	credsFilePath := "key/filesync-415212-ecb8c3396d06.json"
@@ -165,10 +159,8 @@ func main() {
 	defer bucketHandle.Close()
 
 	// Sync the local directory to the bucket
-	err = syncDirToBucket(dir1, bucketHandle)
+	err = syncDirToBucket(ctx, dir1, bucketHandle)
 	if err != nil {
 		fmt.Println("Error syncing directory to bucket:", err)
 	}
-
-	// You can now use the `files` map for further processing
 }
