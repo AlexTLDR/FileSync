@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/storage"
 	"gocloud.dev/blob"
@@ -15,75 +16,81 @@ import (
 	"google.golang.org/api/option"
 )
 
+type foo struct {
+	isDeleted bool
+	deletedOn *time.Time
+	obj       blob.ListObject
+}
+
 func syncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket) error {
 	// Create a map to hold the local files
-	localFiles := make(map[string]blob.ListObject)
-
-	// Iterate over the local directory
-	it := dir.List(&blob.ListOptions{})
+	localFiles := make(map[string]foo)
 	for {
-		obj, err := it.Next(ctx)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
+		myMap := make(map[string]*blob.ListObject)
+		// Iterate over the local directory
+		it := dir.List(&blob.ListOptions{})
+		for {
+			obj, err := it.Next(ctx)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
 
-		// Skip directories and hidden files
-		if obj.IsDir || strings.HasPrefix(obj.Key, ".") {
-			continue
-		}
-
-		localFiles[obj.Key] = *obj
-	}
-
-	// Iterate over the bucket
-	it = bucket.List(&blob.ListOptions{})
-	for {
-		obj, err := it.Next(ctx)
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
+			// Skip directories and hidden files
+			if obj.IsDir || strings.HasPrefix(obj.Key, ".") {
+				continue
+			}
 		}
 
-		localObj, exists := localFiles[obj.Key]
+		// Iterate over the bucket
+		it = bucket.List(&blob.ListOptions{})
+		for {
+			obj, err := it.Next(ctx)
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
 
-		// If the file exists in both the local directory and the bucket
-		if exists {
-			// If the local file is newer, upload it to the bucket
-			if localObj.ModTime.After(obj.ModTime) {
-				if err := uploadFile(ctx, dir, bucket, obj.Key); err != nil {
-					return err
+			localObj, exists := localFiles[obj.Key]
+
+			// If the file exists in both the local directory and the bucket
+			if exists {
+				// If the local file is newer, upload it to the bucket
+				if localObj.obj.ModTime.After(obj.ModTime) {
+					if err := uploadFile(ctx, dir, bucket, obj.Key); err != nil {
+						return err
+					}
+					// If the bucket file is newer, download it to the local directory
+				} else if obj.ModTime.After(localObj.obj.ModTime) {
+					if err := downloadFile(ctx, bucket, obj.Key, "/home/alex/git/FileSync/test-data/dir1/"+obj.Key); err != nil {
+						return err
+					}
 				}
-				// If the bucket file is newer, download it to the local directory
-			} else if obj.ModTime.After(localObj.ModTime) {
+
+				// Remove the file from the localFiles map
+				delete(localFiles, obj.Key)
+			} else {
+				// If the file only exists in the bucket, download it to the local directory
 				if err := downloadFile(ctx, bucket, obj.Key, "/home/alex/git/FileSync/test-data/dir1/"+obj.Key); err != nil {
 					return err
 				}
 			}
+		}
 
-			// Remove the file from the localFiles map
-			delete(localFiles, obj.Key)
-		} else {
-			// If the file only exists in the bucket, download it to the local directory
-			if err := downloadFile(ctx, bucket, obj.Key, "/home/alex/git/FileSync/test-data/dir1/"+obj.Key); err != nil {
+		// If there are any files left in the localFiles map, they only exist in the local directory
+		// Upload these files to the bucket
+		for key := range localFiles {
+			if err := uploadFile(ctx, dir, bucket, key); err != nil {
 				return err
 			}
 		}
+		time.Sleep(5 * time.Second)
 	}
 
-	// If there are any files left in the localFiles map, they only exist in the local directory
-	// Upload these files to the bucket
-	for key := range localFiles {
-		if err := uploadFile(ctx, dir, bucket, key); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func uploadFile(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket, key string) error {
