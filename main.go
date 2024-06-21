@@ -42,6 +42,7 @@ func syncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket)
 			if obj.IsDir || strings.HasPrefix(obj.Key, ".") {
 				continue
 			}
+			myMap[obj.Key] = obj
 		}
 
 		// Iterate over the bucket
