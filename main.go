@@ -17,16 +17,17 @@ import (
 )
 
 type foo struct {
-	isDeleted bool
-	deletedOn *time.Time
-	obj       blob.ListObject
+	//isDeleted bool
+	//deletedOn *time.Time
+	objLocal  blob.ListObject
+	objRemote blob.ListObject
 }
 
 func syncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket) error {
 	// Create a map to hold the local files
-	localFiles := make(map[string]foo)
+	st := make(map[string]foo)
 	for {
-		myMap := make(map[string]*blob.ListObject)
+		//localMap := make(map[string]*blob.ListObject)
 		// Iterate over the local directory
 		it := dir.List(&blob.ListOptions{})
 		for {
@@ -42,7 +43,12 @@ func syncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket)
 			if obj.IsDir || strings.HasPrefix(obj.Key, ".") {
 				continue
 			}
-			myMap[obj.Key] = obj
+			currentFoo, exists := st[obj.Key]
+			if !exists {
+				currentFoo = foo{} // Initialize if it doesn't exist
+			}
+			currentFoo.objLocal = *obj // Modify the struct
+			st[obj.Key] = currentFoo   // Put it back into the map
 		}
 
 		// Iterate over the bucket
@@ -56,39 +62,34 @@ func syncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket)
 				return err
 			}
 
-			localObj, exists := localFiles[obj.Key]
-
-			// If the file exists in both the local directory and the bucket
-			if exists {
-				// If the local file is newer, upload it to the bucket
-				if localObj.obj.ModTime.After(obj.ModTime) {
-					if err := uploadFile(ctx, dir, bucket, obj.Key); err != nil {
-						return err
-					}
-					// If the bucket file is newer, download it to the local directory
-				} else if obj.ModTime.After(localObj.obj.ModTime) {
-					if err := downloadFile(ctx, bucket, obj.Key, "/home/alex/git/FileSync/test-data/dir1/"+obj.Key); err != nil {
-						return err
-					}
+			//localObj, exists := st[obj.Key]
+			// Skip directories and hidden files
+			if obj.IsDir || strings.HasPrefix(obj.Key, ".") {
+				continue
+			}
+			currentFoo, exists := st[obj.Key]
+			if !exists {
+				currentFoo = foo{} // Initialize if it doesn't exist
+			}
+			currentFoo.objLocal = *obj // Modify the struct
+			st[obj.Key] = currentFoo
+		}
+		//
+		for file, bar := range st {
+			// If the local file is newer, upload it to the bucket
+			if bar.objLocal.ModTime.After(bar.objRemote.ModTime) {
+				if err := uploadFile(ctx, dir, bucket, file); err != nil {
+					return err
 				}
-
-				// Remove the file from the localFiles map
-				delete(localFiles, obj.Key)
+				// If the bucket file is newer, download it to the local directory
 			} else {
-				// If the file only exists in the bucket, download it to the local directory
-				if err := downloadFile(ctx, bucket, obj.Key, "/home/alex/git/FileSync/test-data/dir1/"+obj.Key); err != nil {
+				if err := downloadFile(ctx, bucket, file, "/home/alex/git/FileSync/test-data/dir1/"+file); err != nil {
 					return err
 				}
 			}
-		}
 
-		// If there are any files left in the localFiles map, they only exist in the local directory
-		// Upload these files to the bucket
-		for key := range localFiles {
-			if err := uploadFile(ctx, dir, bucket, key); err != nil {
-				return err
-			}
 		}
+		// Sleep for 5 seconds before syncing again
 		time.Sleep(5 * time.Second)
 	}
 
