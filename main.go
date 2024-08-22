@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -25,78 +27,54 @@ type fileStatus struct {
 const timeThreshold = 10 * time.Second
 
 func syncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket) {
-	localFiles := make(map[string]*fileStatus)
-	bucketFiles := make(map[string]*fileStatus)
+	if err := ensureMetadataFileExists(ctx, bucket); err != nil {
+		log.Printf("Failed to ensure metadata file exists: %v", err)
+		return
+	}
 
 	for {
-		log.Println("Starting synchronization cycle")
+		metadata, err := getBucketMetadata(ctx, bucket)
+		if err != nil {
+			log.Printf("Error getting bucket metadata: %v", err)
+			continue
+		}
 
-		log.Println("Updating local file statuses")
-		updateFileStatuses(ctx, dir, localFiles)
-		log.Println("Updating bucket file statuses")
-		updateFileStatuses(ctx, bucket, bucketFiles)
+		localFiles := make(map[string]*blob.ListObject)
+		if err := listFiles(ctx, dir, localFiles); err != nil {
+			log.Printf("Error listing local files: %v", err)
+			continue
+		}
 
-		for key, localStatus := range localFiles {
-			bucketStatus, existsInBucket := bucketFiles[key]
-
-			log.Printf("Processing file: %s", key)
-			localUTCTime := localStatus.obj.ModTime.UTC()
-			log.Printf("Local status: isDeleted=%v, modTime=%v (UTC)", localStatus.isDeleted, localUTCTime)
-			if existsInBucket {
-				log.Printf("Bucket status: isDeleted=%v, modTime=%v", bucketStatus.isDeleted, bucketStatus.obj.ModTime)
-			} else {
-				log.Println("File does not exist in bucket")
-			}
-
-			if localStatus.isDeleted && !existsInBucket {
-				log.Printf("File %s deleted locally and doesn't exist in bucket, removing from tracking", key)
-				delete(localFiles, key)
-			} else if localStatus.isDeleted && existsInBucket && !bucketStatus.isDeleted {
-				log.Printf("Deleting file %s from bucket", key)
-				if err := bucket.Delete(ctx, key); err != nil {
-					log.Printf("Error deleting file %s from bucket: %v", key, err)
-				}
-			} else if !existsInBucket {
-				log.Printf("Uploading new local file %s to bucket", key)
+		for key, localObj := range localFiles {
+			metaData, exists := metadata[key]
+			if !exists || localObj.ModTime.After(metaData.ModTime) {
 				if err := uploadFile(ctx, dir, bucket, key); err != nil {
 					log.Printf("Error uploading file %s: %v", key, err)
+					continue
 				}
-			} else if bucketStatus.isDeleted && !localStatus.isDeleted {
-				log.Printf("Deleting local file %s", key)
+				metadata[key] = FileMetadata{ModTime: localObj.ModTime, IsDeleted: false}
+			} else if metaData.IsDeleted {
 				localPath := filepath.Join("/home/alex/git/FileSync/test-data/dir1", key)
 				if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
 					log.Printf("Error deleting local file %s: %v", key, err)
 				}
-				localStatus.isDeleted = true
-				localStatus.deletedOn = bucketStatus.deletedOn
-			} else if !localStatus.isDeleted && !bucketStatus.isDeleted {
-				timeDiff := localUTCTime.Sub(bucketStatus.obj.ModTime)
-				if timeDiff > timeThreshold {
-					log.Printf("Uploading newer local file %s to bucket", key)
-					if err := uploadFile(ctx, dir, bucket, key); err != nil {
-						log.Printf("Error uploading file %s: %v", key, err)
-					}
-				} else if timeDiff < -timeThreshold {
-					log.Printf("Downloading newer bucket file %s", key)
-					if err := downloadFile(ctx, bucket, key, filepath.Join("/home/alex/git/FileSync/test-data/dir1", key)); err != nil {
-						log.Printf("Error downloading file %s: %v", key, err)
-					}
-				} else {
-					log.Printf("File %s is up to date (time difference: %v)", key, timeDiff)
-				}
+				delete(localFiles, key)
 			}
 		}
-		for key, bucketStatus := range bucketFiles {
-			if _, existsLocally := localFiles[key]; !existsLocally && !bucketStatus.isDeleted {
-				log.Printf("Downloading new bucket file %s", key)
+
+		for key, metaData := range metadata {
+			if _, exists := localFiles[key]; !exists && !metaData.IsDeleted {
 				if err := downloadFile(ctx, bucket, key, filepath.Join("/home/alex/git/FileSync/test-data/dir1", key)); err != nil {
-					log.Printf("Error downloading new file %s: %v", key, err)
+					log.Printf("Error downloading file %s: %v", key, err)
 				}
 			}
 		}
 
-		log.Println("Synchronization cycle completed")
-		time.Sleep(timeThreshold)
+		if err := updateBucketMetadata(ctx, bucket, metadata); err != nil {
+			log.Printf("Error updating bucket metadata: %v", err)
+		}
+
+		time.Sleep(5 * time.Second)
 	}
 }
 func updateFileStatuses(ctx context.Context, b *blob.Bucket, files map[string]*fileStatus) {
@@ -211,4 +189,92 @@ func main() {
 
 	// Sync the local directory to the bucket
 	syncDirToBucket(ctx, dir1, bucketHandle)
+}
+
+type FileMetadata struct {
+	ModTime   time.Time `json:"mod_time"`
+	IsDeleted bool      `json:"is_deleted"`
+}
+
+type BucketMetadata map[string]FileMetadata
+
+const MetadataFileName = ".filesync_metadata.json"
+
+func updateBucketMetadata(ctx context.Context, bucket *blob.Bucket, metadata BucketMetadata) error {
+	data, err := json.Marshal(metadata)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %v", err)
+	}
+
+	opts := &blob.WriterOptions{
+		ContentType: "application/json",
+	}
+	w, err := bucket.NewWriter(ctx, MetadataFileName, opts)
+	if err != nil {
+		return fmt.Errorf("failed to create writer for metadata: %v", err)
+	}
+	defer w.Close()
+
+	_, err = w.Write(data)
+	if err != nil {
+		return fmt.Errorf("failed to write metadata: %v", err)
+	}
+
+	return w.Close()
+}
+
+func getBucketMetadata(ctx context.Context, bucket *blob.Bucket) (BucketMetadata, error) {
+	r, err := bucket.NewReader(ctx, MetadataFileName, nil)
+	if err != nil {
+		if err == storage.ErrObjectNotExist {
+			emptyMetadata := BucketMetadata{}
+			if updateErr := updateBucketMetadata(ctx, bucket, emptyMetadata); updateErr != nil {
+				return nil, fmt.Errorf("failed to create initial metadata: %v", updateErr)
+			}
+			return emptyMetadata, nil
+		}
+		return nil, fmt.Errorf("failed to read metadata: %v", err)
+	}
+	defer r.Close()
+
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read metadata content: %v", err)
+	}
+
+	var metadata BucketMetadata
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal metadata: %v", err)
+	}
+	return metadata, nil
+}
+func listFiles(ctx context.Context, b *blob.Bucket, files map[string]*blob.ListObject) error {
+	it := b.List(&blob.ListOptions{})
+	for {
+		obj, err := it.Next(ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if !obj.IsDir && !strings.HasPrefix(obj.Key, ".") {
+			files[obj.Key] = obj
+		}
+	}
+	return nil
+}
+
+func ensureMetadataFileExists(ctx context.Context, bucket *blob.Bucket) error {
+	exists, err := bucket.Exists(ctx, MetadataFileName)
+	if err != nil {
+		return fmt.Errorf("failed to check if metadata file exists: %v", err)
+	}
+	if !exists {
+		emptyMetadata := BucketMetadata{}
+		if err := updateBucketMetadata(ctx, bucket, emptyMetadata); err != nil {
+			return fmt.Errorf("failed to create initial metadata file: %v", err)
+		}
+	}
+	return nil
 }
