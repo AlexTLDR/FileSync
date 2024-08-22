@@ -26,62 +26,73 @@ type foo struct {
 func syncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket) error {
 	for {
 		localFiles := make(map[string]*blob.ListObject)
+		bucketFiles := make(map[string]*blob.ListObject)
 
 		// List local files
-		it := dir.List(&blob.ListOptions{})
-		for {
-			obj, err := it.Next(ctx)
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return err
-			}
-			if !obj.IsDir && !strings.HasPrefix(obj.Key, ".") {
-				localFiles[obj.Key] = obj
-			}
+		if err := listFiles(ctx, dir, localFiles); err != nil {
+			return err
 		}
 
-		// Sync with bucket
-		it = bucket.List(&blob.ListOptions{})
-		for {
-			bucketObj, err := it.Next(ctx)
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return err
-			}
+		// List bucket files
+		if err := listFiles(ctx, bucket, bucketFiles); err != nil {
+			return err
+		}
 
-			localObj, exists := localFiles[bucketObj.Key]
-
-			if exists {
+		// Sync local to bucket
+		for key, localObj := range localFiles {
+			bucketObj, existsInBucket := bucketFiles[key]
+			if existsInBucket {
 				if localObj.ModTime.After(bucketObj.ModTime) {
-					if err := uploadFile(ctx, dir, bucket, bucketObj.Key); err != nil {
+					if err := uploadFile(ctx, dir, bucket, key); err != nil {
 						return err
 					}
 				} else if bucketObj.ModTime.After(localObj.ModTime) {
-					if err := downloadFile(ctx, bucket, bucketObj.Key, filepath.Join("/home/alex/git/FileSync/test-data/dir1", bucketObj.Key)); err != nil {
+					if err := downloadFile(ctx, bucket, key, filepath.Join("/home/alex/git/FileSync/test-data/dir1", key)); err != nil {
 						return err
 					}
 				}
-				delete(localFiles, bucketObj.Key)
+				delete(bucketFiles, key)
 			} else {
-				if err := downloadFile(ctx, bucket, bucketObj.Key, filepath.Join("/home/alex/git/FileSync/test-data/dir1", bucketObj.Key)); err != nil {
+				if err := uploadFile(ctx, dir, bucket, key); err != nil {
 					return err
 				}
 			}
 		}
 
-		// Upload remaining local files
-		for key := range localFiles {
-			if err := uploadFile(ctx, dir, bucket, key); err != nil {
+		// Delete files from bucket that don't exist locally
+		for key := range bucketFiles {
+			if err := bucket.Delete(ctx, key); err != nil {
+				return err
+			}
+		}
+
+		// Delete local files that don't exist in bucket
+		for key := range bucketFiles {
+			localPath := filepath.Join("/home/alex/git/FileSync/test-data/dir1", key)
+			if err := os.Remove(localPath); err != nil && !os.IsNotExist(err) {
 				return err
 			}
 		}
 
 		time.Sleep(5 * time.Second)
 	}
+}
+
+func listFiles(ctx context.Context, b *blob.Bucket, files map[string]*blob.ListObject) error {
+	it := b.List(&blob.ListOptions{})
+	for {
+		obj, err := it.Next(ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if !obj.IsDir && !strings.HasPrefix(obj.Key, ".") {
+			files[obj.Key] = obj
+		}
+	}
+	return nil
 }
 
 func uploadFile(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket, key string) error {
