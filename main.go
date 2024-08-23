@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,7 +18,7 @@ import (
 	"google.golang.org/api/option"
 )
 
-const timeThreshold = 10 * time.Second
+var ongoingDownloads = make(map[string]bool)
 
 func syncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket) {
 	for {
@@ -33,19 +34,24 @@ func syncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket)
 			continue
 		}
 
-		bucketFiles := make(map[string]*blob.ListObject)
-		if err := listFiles(ctx, bucket, bucketFiles); err != nil {
-			log.Printf("Error listing bucket files: %v", err)
-			continue
-		}
-
-		// Update metadata with bucket files
-		for key, bucketObj := range bucketFiles {
-			if _, exists := metadata[key]; !exists {
-				metadata[key] = FileMetadata{
-					ModTime:     bucketObj.ModTime,
-					IsDeleted:   false,
-					DeletedTime: time.Time{},
+		for key, metaData := range metadata {
+			_, localExists := localFiles[key]
+			if !localExists && !metaData.IsDeleted {
+				log.Printf("File %s exists in metadata but not locally. Starting download...", key)
+				if err := downloadFile(ctx, bucket, key, key); err != nil {
+					log.Printf("Error downloading file %s: %v", key, err)
+					continue
+				}
+				// Immediately update localFiles map after successful download
+				if attr, err := dir.Attributes(ctx, key); err == nil {
+					localFiles[key] = &blob.ListObject{
+						Key:     key,
+						ModTime: attr.ModTime,
+						Size:    attr.Size,
+					}
+					log.Printf("Updated local files map with %s", key)
+				} else {
+					log.Printf("Error getting attributes for %s: %v", key, err)
 				}
 			}
 		}
@@ -111,27 +117,33 @@ func uploadFile(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket, key 
 }
 
 func downloadFile(ctx context.Context, bucket *blob.Bucket, key string, destPath string) error {
-	// Open the bucket file
+	log.Printf("Starting download of %s", key)
+
 	r, err := bucket.NewReader(ctx, key, nil)
 	if err != nil {
+		log.Printf("Error opening bucket file %s: %v", key, err)
 		return err
 	}
 	defer r.Close()
 
-	// Create the destination file
-	destFile, err := os.Create(destPath)
+	fullPath := filepath.Join("/home/alex/git/FileSync/test-data/dir1", destPath)
+	destFile, err := os.Create(fullPath)
 	if err != nil {
+		log.Printf("Error creating destination file %s: %v", fullPath, err)
 		return err
 	}
 	defer destFile.Close()
 
-	// Copy the bucket file to the destination file
-	if _, err := io.Copy(destFile, r); err != nil {
+	written, err := io.Copy(destFile, r)
+	if err != nil {
+		log.Printf("Error copying file %s: %v", key, err)
 		return err
 	}
 
+	log.Printf("Successfully downloaded %s to %s (%d bytes written)", key, fullPath, written)
 	return nil
 }
+
 func main() {
 	ctx := context.Background()
 
