@@ -144,6 +144,54 @@ func downloadFile(ctx context.Context, bucket *blob.Bucket, key string, destPath
 	return nil
 }
 
+func periodicBucketScan(ctx context.Context, bucket *blob.Bucket, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			log.Println("Starting periodic bucket scan...")
+			metadata, err := getBucketMetadata(ctx, bucket)
+			if err != nil {
+				log.Printf("Error getting bucket metadata: %v", err)
+				continue
+			}
+
+			// Check for new or modified files in the bucket
+			iter := bucket.List(&blob.ListOptions{})
+			for {
+				obj, err := iter.Next(ctx)
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					log.Printf("Error listing bucket contents: %v", err)
+					break
+				}
+				metaData, exists := metadata[obj.Key]
+				if !exists || obj.ModTime.After(metaData.ModTime) {
+					log.Printf("New or modified file detected in bucket: %s", obj.Key)
+					// Update metadata
+					metadata[obj.Key] = FileMetadata{
+						ModTime:     obj.ModTime,
+						IsDeleted:   false,
+						DeletedTime: time.Time{},
+					}
+				}
+			}
+
+			// Update bucket metadata
+			if err := updateBucketMetadata(ctx, bucket, metadata); err != nil {
+				log.Printf("Error updating bucket metadata: %v", err)
+			}
+
+			log.Println("Periodic bucket scan completed")
+		}
+	}
+}
 func main() {
 	ctx := context.Background()
 
@@ -164,14 +212,17 @@ func main() {
 	defer dir1.Close()
 
 	// Open the bucket
-	bucketHandle, err := blob.OpenBucket(ctx, bucketName)
+	bucket, err := blob.OpenBucket(ctx, bucketName)
 	if err != nil {
 		panic(err)
 	}
-	defer bucketHandle.Close()
+	defer bucket.Close()
+
+	// Start periodic bucket scan
+	go periodicBucketScan(ctx, bucket, 5*time.Minute)
 
 	// Sync the local directory to the bucket
-	syncDirToBucket(ctx, dir1, bucketHandle)
+	syncDirToBucket(ctx, dir1, bucket)
 }
 
 type FileMetadata struct {
