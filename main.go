@@ -60,6 +60,10 @@ func syncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket)
 			metaData, exists := metadata[key]
 			bucketExists, _ := bucket.Exists(ctx, key)
 
+			log.Printf("Processing local file: %s", key)
+			log.Printf("File exists in metadata: %v", exists)
+			log.Printf("File exists in bucket: %v", bucketExists)
+
 			if !exists || localObj.ModTime.After(metaData.ModTime) || (exists && metaData.IsDeleted) {
 				log.Printf("Uploading file %s to bucket", key)
 				if err := uploadFile(ctx, dir, bucket, key); err != nil {
@@ -81,6 +85,8 @@ func syncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket)
 					IsDeleted:   true,
 					DeletedTime: time.Now(),
 				}
+			} else {
+				log.Printf("File %s is up to date, skipping upload", key)
 			}
 		}
 
