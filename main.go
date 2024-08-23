@@ -151,6 +151,7 @@ func periodicBucketScan(ctx context.Context, bucket *blob.Bucket, interval time.
 	for {
 		select {
 		case <-ctx.Done():
+			log.Println("Periodic bucket scan stopped")
 			return
 		case <-ticker.C:
 			log.Println("Starting periodic bucket scan...")
@@ -159,9 +160,12 @@ func periodicBucketScan(ctx context.Context, bucket *blob.Bucket, interval time.
 				log.Printf("Error getting bucket metadata: %v", err)
 				continue
 			}
+			log.Printf("Current metadata entries: %d", len(metadata))
 
-			// Check for new or modified files in the bucket
+			log.Println("Listing bucket files...")
 			iter := bucket.List(&blob.ListOptions{})
+			updated := false
+			newFiles := 0
 			for {
 				obj, err := iter.Next(ctx)
 				if err == io.EOF {
@@ -171,58 +175,38 @@ func periodicBucketScan(ctx context.Context, bucket *blob.Bucket, interval time.
 					log.Printf("Error listing bucket contents: %v", err)
 					break
 				}
-				metaData, exists := metadata[obj.Key]
-				if !exists || obj.ModTime.After(metaData.ModTime) {
-					log.Printf("New or modified file detected in bucket: %s", obj.Key)
-					// Update metadata
-					metadata[obj.Key] = FileMetadata{
-						ModTime:     obj.ModTime,
-						IsDeleted:   false,
-						DeletedTime: time.Time{},
+				log.Printf("Found file in bucket: %s", obj.Key)
+
+				if obj.Key != MetadataFileName {
+					metaData, exists := metadata[obj.Key]
+					if !exists || obj.ModTime.After(metaData.ModTime) {
+						log.Printf("New or modified file detected: %s", obj.Key)
+						metadata[obj.Key] = FileMetadata{
+							ModTime:     obj.ModTime,
+							IsDeleted:   false,
+							DeletedTime: time.Time{},
+						}
+						updated = true
+						newFiles++
 					}
 				}
 			}
 
-			// Update bucket metadata
-			if err := updateBucketMetadata(ctx, bucket, metadata); err != nil {
-				log.Printf("Error updating bucket metadata: %v", err)
+			if updated {
+				log.Printf("Found %d new or modified files in the bucket", newFiles)
+				log.Printf("Updating metadata file with %d entries", len(metadata))
+				if err := updateBucketMetadata(ctx, bucket, metadata); err != nil {
+					log.Printf("Error updating bucket metadata: %v", err)
+				} else {
+					log.Println("Metadata file successfully updated with new changes")
+				}
+			} else {
+				log.Println("No changes detected in bucket")
 			}
 
 			log.Println("Periodic bucket scan completed")
 		}
 	}
-}
-func main() {
-	ctx := context.Background()
-
-	// Replace with your actual local directory, credentials file path, and bucket name
-	credsFilePath := "key/filesync-415212-ecb8c3396d06.json"
-	bucketName := "gs://file-sync"
-
-	// Create a Google Cloud client with the credentials file
-	_, err := storage.NewClient(ctx, option.WithCredentialsFile(credsFilePath))
-	if err != nil {
-		log.Fatalf("Failed to create client: %v", err)
-	}
-
-	dir1, err := blob.OpenBucket(ctx, "file:///home/alex/git/FileSync/test-data/dir1")
-	if err != nil {
-		panic(err)
-	}
-	defer dir1.Close()
-
-	// Open the bucket
-	bucket, err := blob.OpenBucket(ctx, bucketName)
-	if err != nil {
-		panic(err)
-	}
-	defer bucket.Close()
-
-	// Start periodic bucket scan
-	go periodicBucketScan(ctx, bucket, 5*time.Minute)
-
-	// Sync the local directory to the bucket
-	syncDirToBucket(ctx, dir1, bucket)
 }
 
 type FileMetadata struct {
@@ -236,7 +220,7 @@ type BucketMetadata map[string]FileMetadata
 const MetadataFileName = ".filesync_metadata.json"
 
 func updateBucketMetadata(ctx context.Context, bucket *blob.Bucket, metadata BucketMetadata) error {
-	data, err := json.MarshalIndent(metadata, "", "  ")
+	data, err := json.MarshalIndent(metadata, "", " ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal metadata: %v", err)
 	}
@@ -312,16 +296,39 @@ func listFiles(ctx context.Context, b *blob.Bucket, files map[string]*blob.ListO
 	return nil
 }
 
-func ensureMetadataFileExists(ctx context.Context, bucket *blob.Bucket) error {
-	exists, err := bucket.Exists(ctx, MetadataFileName)
+func main() {
+	ctx := context.Background()
+
+	// Replace with your actual local directory, credentials file path, and bucket name
+	credsFilePath := "key/filesync-415212-ecb8c3396d06.json"
+	bucketName := "gs://file-sync"
+
+	// Create a Google Cloud client with the credentials file
+	_, err := storage.NewClient(ctx, option.WithCredentialsFile(credsFilePath))
 	if err != nil {
-		return fmt.Errorf("failed to check if metadata file exists: %v", err)
+		log.Fatalf("Failed to create client: %v", err)
 	}
-	if !exists {
-		emptyMetadata := BucketMetadata{}
-		if err := updateBucketMetadata(ctx, bucket, emptyMetadata); err != nil {
-			return fmt.Errorf("failed to create initial metadata file: %v", err)
-		}
+
+	dir1, err := blob.OpenBucket(ctx, "file:///home/alex/git/FileSync/test-data/dir1")
+	if err != nil {
+		panic(err)
 	}
-	return nil
+	defer dir1.Close()
+
+	// Open the bucket
+	bucket, err := blob.OpenBucket(ctx, bucketName)
+	if err != nil {
+		panic(err)
+	}
+	defer bucket.Close()
+
+	// Start periodic bucket scan
+	log.Println("Starting periodic bucket scan...")
+	go periodicBucketScan(ctx, bucket, 5*time.Second)
+
+	// Sync the local directory to the bucket
+	syncDirToBucket(ctx, dir1, bucket)
+
+	// Wait indefinitely
+	select {}
 }
