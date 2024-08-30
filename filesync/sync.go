@@ -1,6 +1,7 @@
 package filesync
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log"
@@ -27,28 +28,38 @@ func SyncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket)
 			continue
 		}
 
+		// Handle file downloads from the bucket
 		for key, metaData := range metadata {
 			_, localExists := localFiles[key]
-			if !localExists && !metaData.IsDeleted {
-				log.Printf("File %s exists in metadata but not locally. Starting download...", key)
+			bucketExists, _ := bucket.Exists(ctx, key)
+
+			if !localExists && bucketExists && !metaData.IsDeleted {
+				log.Printf("File %s exists in the bucket but not locally. Downloading...", key)
 				if err := DownloadFile(ctx, bucket, key, key); err != nil {
 					log.Printf("Error downloading file %s: %v", key, err)
-					continue
-				}
-				// Immediately update localFiles map after successful download
-				if attr, err := dir.Attributes(ctx, key); err == nil {
-					localFiles[key] = &blob.ListObject{
-						Key:     key,
-						ModTime: attr.ModTime,
-						Size:    attr.Size,
-					}
-					log.Printf("Updated local files map with %s", key)
-				} else {
-					log.Printf("Error getting attributes for %s: %v", key, err)
 				}
 			}
 		}
 
+		// Handle file deletions from the bucket
+		for key, metaData := range metadata {
+			_, localExists := localFiles[key]
+			bucketExists, _ := bucket.Exists(ctx, key)
+
+			if !localExists && !bucketExists && !metaData.IsDeleted {
+				log.Printf("File %s exists in metadata but not in the bucket or locally. Marking as deleted...", key)
+				metadata[key] = storage.FileMetadata{
+					ModTime:     metaData.ModTime,
+					IsDeleted:   true,
+					DeletedTime: time.Now(),
+				}
+				if err := dir.Delete(ctx, key); err != nil {
+					log.Printf("Error deleting file %s locally: %v", key, err)
+				}
+			}
+		}
+
+		// Handle file uploads and downloads
 		for key, localObj := range localFiles {
 			metaData, exists := metadata[key]
 			bucketExists, _ := bucket.Exists(ctx, key)
@@ -69,17 +80,11 @@ func SyncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket)
 					DeletedTime: time.Time{},
 				}
 			} else if !bucketExists && !metaData.IsDeleted {
-				log.Printf("Deleting local file %s", key)
+				log.Printf("File %s exists in metadata but not in the bucket. Deleting locally...", key)
 				if err := dir.Delete(ctx, key); err != nil {
-					log.Printf("Error deleting local file %s: %v", key, err)
+					log.Printf("Error deleting file %s locally: %v", key, err)
 				}
-				metadata[key] = storage.FileMetadata{
-					ModTime:     time.Now(),
-					IsDeleted:   true,
-					DeletedTime: time.Now(),
-				}
-			} else {
-				log.Printf("File %s is up to date, skipping upload", key)
+				delete(metadata, key)
 			}
 		}
 
@@ -174,27 +179,79 @@ func ListFiles(ctx context.Context, b *blob.Bucket, files map[string]*blob.ListO
 }
 
 func UploadFile(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket, key string) error {
-	// Open the local file
+	// Check if the file already exists in the bucket
+	_, err := bucket.Attributes(ctx, key)
+	if err == nil {
+		// Compare the file contents
+		localReader, err := dir.NewReader(ctx, key, nil)
+		if err != nil {
+			log.Printf("Error opening local file %s: %v", key, err)
+			return err
+		}
+		defer localReader.Close()
+
+		bucketReader, err := bucket.NewReader(ctx, key, nil)
+		if err != nil {
+			log.Printf("Error opening bucket file %s: %v", key, err)
+			return err
+		}
+		defer bucketReader.Close()
+
+		localContent, err := io.ReadAll(localReader)
+		if err != nil {
+			log.Printf("Error reading local file %s: %v", key, err)
+			return err
+		}
+
+		bucketContent, err := io.ReadAll(bucketReader)
+		if err != nil {
+			log.Printf("Error reading bucket file %s: %v", key, err)
+			return err
+		}
+
+		if bytes.Equal(localContent, bucketContent) {
+			log.Printf("File %s already exists in the bucket with the same content. Skipping upload.", key)
+			return nil
+		}
+	}
+
+	// File doesn't exist in the bucket or has different content, proceed with upload
+	log.Printf("Uploading file %s to bucket", key)
 	r, err := dir.NewReader(ctx, key, nil)
 	if err != nil {
+		log.Printf("Error opening local file %s: %v", key, err)
 		return err
 	}
 	defer r.Close()
 
-	// Create a writer for the bucket file
-	w, err := bucket.NewWriter(ctx, key, nil)
+	writerOptions := &blob.WriterOptions{
+		ContentType: "application/octet-stream", // Set a default content type
+	}
+
+	// Check if the file exists in the bucket
+	if _, err := bucket.Attributes(ctx, key); err == nil {
+		// File exists in the bucket, retrieve the content type
+		attrs, err := bucket.Attributes(ctx, key)
+		if err == nil {
+			writerOptions.ContentType = attrs.ContentType
+		}
+	}
+
+	w, err := bucket.NewWriter(ctx, key, writerOptions)
 	if err != nil {
+		log.Printf("Error creating bucket writer for file %s: %v", key, err)
+		return err
+	}
+	defer w.Close()
+
+	written, err := io.Copy(w, r)
+	if err != nil {
+		log.Printf("Error uploading file %s: %v", key, err)
 		return err
 	}
 
-	// Copy the local file to the bucket
-	if _, err := io.Copy(w, r); err != nil {
-		w.Close()
-		return err
-	}
-
-	// Close the writer to commit the upload
-	return w.Close()
+	log.Printf("Successfully uploaded %s to bucket (%d bytes written)", key, written)
+	return nil
 }
 
 func DownloadFile(ctx context.Context, bucket *blob.Bucket, key string, destPath string) error {
