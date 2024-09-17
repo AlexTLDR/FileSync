@@ -81,3 +81,19 @@ func GetBucketMetadata(ctx context.Context, bucket *blob.Bucket) (BucketMetadata
 	log.Println("Metadata retrieved successfully.")
 	return Metadata, nil
 }
+
+func CleanMetadata(ctx context.Context, bucket *blob.Bucket, metadata BucketMetadata) (BucketMetadata, error) {
+	cleanedMetadata := make(BucketMetadata)
+	for key, data := range metadata {
+		exists, err := bucket.Exists(ctx, key)
+		if err != nil {
+			return nil, fmt.Errorf("error checking existence of %s: %v", key, err)
+		}
+		if exists {
+			cleanedMetadata[key] = data
+		} else {
+			log.Printf("Removing %s from metadata as it no longer exists in the bucket", key)
+		}
+	}
+	return cleanedMetadata, nil
+}
