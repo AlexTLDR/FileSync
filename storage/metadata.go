@@ -15,6 +15,7 @@ type FileMetadata struct {
 	ModTime     time.Time `json:"mod_time"`
 	IsDeleted   bool      `json:"is_deleted"`
 	DeletedTime time.Time `json:"deleted_time"`
+	HasChanged  bool      `json:"-"`
 }
 
 type BucketMetadata map[string]FileMetadata

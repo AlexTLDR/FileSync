@@ -13,8 +13,6 @@ import (
 	"google.golang.org/api/option"
 )
 
-var ongoingDownloads = make(map[string]bool)
-
 func main() {
 	ctx := context.Background()
 
@@ -32,14 +30,24 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer dir1.Close()
+	defer func(dir1 *blob.Bucket) {
+		err := dir1.Close()
+		if err != nil {
+			panic(err)
+		}
+	}(dir1)
 
 	// Open the bucket
 	bucket, err := blob.OpenBucket(ctx, bucketName)
 	if err != nil {
 		panic(err)
 	}
-	defer bucket.Close()
+	defer func(bucket *blob.Bucket) {
+		err := bucket.Close()
+		if err != nil {
+			panic(err)
+		}
+	}(bucket)
 
 	// Start periodic bucket scan
 	log.Println("Starting periodic bucket scan...")
