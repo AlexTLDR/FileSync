@@ -13,8 +13,6 @@ import (
 	"google.golang.org/api/option"
 )
 
-var ongoingDownloads = make(map[string]bool)
-
 func main() {
 	ctx := context.Background()
 
@@ -32,22 +30,33 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer dir1.Close()
+	defer func(dir1 *blob.Bucket) {
+		err := dir1.Close()
+		if err != nil {
+			panic(err)
+		}
+	}(dir1)
 
 	// Open the bucket
 	bucket, err := blob.OpenBucket(ctx, bucketName)
 	if err != nil {
 		panic(err)
 	}
-	defer bucket.Close()
+	defer func(bucket *blob.Bucket) {
+		err := bucket.Close()
+		if err != nil {
+			panic(err)
+		}
+	}(bucket)
 
-	// Start periodic bucket scan
-	log.Println("Starting periodic bucket scan...")
-	go filesync.PeriodicBucketScan(ctx, bucket, 5*time.Second)
+	// Start periodic bucket scan in a separate goroutine
+	go func() {
+		filesync.PeriodicBucketScan(ctx, bucket, 5*time.Second)
+	}()
 
-	// Sync the local directory to the bucket
-	filesync.SyncDirToBucket(ctx, dir1, bucket)
-
-	// Wait indefinitely
-	select {}
+	// Run SyncDirToBucket in an infinite loop
+	for {
+		filesync.SyncDirToBucket(ctx, dir1, bucket)
+		time.Sleep(5 * time.Second) // Adjust the sleep duration as needed
+	}
 }
