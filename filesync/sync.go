@@ -30,103 +30,195 @@ func SyncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket)
 			continue
 		}
 
-		for key := range metadata {
+		// Process files in metadata
+		for key, metaData := range metadata {
 			if key == storage.MetadataFileName {
 				continue
 			}
 
 			localObj, localExists := localFiles[key]
+			bucketExists, _ := bucket.Exists(ctx, key)
 
-			if !localExists {
-				log.Printf("File %s doesn't exist locally. Downloading...", key)
-				if err := DownloadFile(ctx, bucket, key, key); err != nil {
-					log.Printf("Error downloading file %s: %v", key, err)
-					continue
-				}
-				log.Printf("Successfully downloaded %s", key)
-			} else {
-				bucketAttrs, err := bucket.Attributes(ctx, key)
-				if err != nil {
-					log.Printf("Error getting bucket attributes for %s: %v", key, err)
-					continue
-				}
-
-				if bucketAttrs.ModTime.After(localObj.ModTime) {
-					log.Printf("Bucket file %s is newer. Re-downloading...", key)
-					if err := DownloadFile(ctx, bucket, key, key); err != nil {
-						log.Printf("Error re-downloading file %s: %v", key, err)
+			switch {
+			case !localExists && bucketExists && !metaData.IsDeletedBucket:
+				// File exists in bucket but not locally - check if it was deleted locally
+				if metaData.IsDeletedLocal {
+					// File was deleted locally, delete from bucket
+					log.Printf("Deleting file %s from bucket (local deletion)", key)
+					if err := bucket.Delete(ctx, key); err != nil {
+						log.Printf("Error deleting file %s from bucket: %v", key, err)
 					} else {
-						log.Printf("Successfully re-downloaded %s", key)
+						metaData.IsDeletedBucket = true
+						metaData.BucketDeleteTime = time.Now()
 					}
 				} else {
-					log.Printf("Local file %s is up to date. Skipping download.", key)
+					// File doesn't exist locally but wasn't marked as deleted, download it
+					log.Printf("Downloading file %s from bucket", key)
+					if err := DownloadFile(ctx, bucket, key, key); err != nil {
+						log.Printf("Error downloading file %s: %v", key, err)
+					} else {
+						metaData.LocalModTime = time.Now()
+						metaData.IsDeletedLocal = false
+						metaData.LocalDeleteTime = time.Time{}
+					}
+				}
+			case localExists && !bucketExists && !metaData.IsDeletedLocal:
+				// File exists locally but not in bucket - upload
+				log.Printf("Uploading file %s to bucket", key)
+				if err := UploadFile(ctx, dir, bucket, key); err != nil {
+					log.Printf("Error uploading file %s: %v", key, err)
+				} else {
+					metaData.BucketModTime = time.Now()
+					metaData.IsDeletedBucket = false
+					metaData.BucketDeleteTime = time.Time{}
+				}
+			case localExists && bucketExists:
+				// File exists in both places - check for modifications
+				bucketAttrs, _ := bucket.Attributes(ctx, key)
+				if bucketAttrs.ModTime.After(metaData.LocalModTime) {
+					// Bucket version is newer
+					log.Printf("Updating local file %s from bucket", key)
+					if err := DownloadFile(ctx, bucket, key, key); err != nil {
+						log.Printf("Error updating local file %s: %v", key, err)
+					} else {
+						metaData.LocalModTime = bucketAttrs.ModTime
+					}
+				} else if localObj.ModTime.After(metaData.BucketModTime) {
+					// Local version is newer
+					log.Printf("Updating bucket file %s from local", key)
+					if err := UploadFile(ctx, dir, bucket, key); err != nil {
+						log.Printf("Error updating bucket file %s: %v", key, err)
+					} else {
+						metaData.BucketModTime = localObj.ModTime
+					}
+				}
+			case !localExists && metaData.IsDeletedLocal:
+				// File was deleted locally - delete from bucket
+				if bucketExists, _ := bucket.Exists(ctx, key); bucketExists {
+					log.Printf("Deleting file %s from bucket", key)
+					if err := bucket.Delete(ctx, key); err != nil {
+						log.Printf("Error deleting file %s from bucket: %v", key, err)
+					} else {
+						metaData.IsDeletedBucket = true
+						metaData.BucketDeleteTime = time.Now()
+					}
+				} else {
+					log.Printf("File %s already deleted from bucket", key)
+					metaData.IsDeletedBucket = true
+					metaData.BucketDeleteTime = time.Now()
+				}
+			case !bucketExists && metaData.IsDeletedBucket:
+				// File was deleted from bucket - delete locally
+				log.Printf("Deleting local file %s", key)
+				if err := dir.Delete(ctx, key); err != nil && !os.IsNotExist(err) {
+					log.Printf("Error deleting local file %s: %v", key, err)
+				} else {
+					metaData.IsDeletedLocal = true
+					metaData.LocalDeleteTime = time.Now()
+				}
+			}
+
+			metadata[key] = metaData
+		}
+
+		// Check for new local files
+		for key, localObj := range localFiles {
+			if _, exists := metadata[key]; !exists {
+				log.Printf("New local file %s found. Uploading to bucket...", key)
+				if err := UploadFile(ctx, dir, bucket, key); err != nil {
+					log.Printf("Error uploading new file %s: %v", key, err)
+				} else {
+					metadata[key] = storage.FileMetadata{
+						BucketModTime:    localObj.ModTime,
+						LocalModTime:     localObj.ModTime,
+						IsDeletedBucket:  false,
+						IsDeletedLocal:   false,
+						BucketDeleteTime: time.Time{},
+						LocalDeleteTime:  time.Time{},
+						LastSyncTime:     time.Now(),
+					}
 				}
 			}
 		}
 
-		// Handle local file uploads and deletions here
+		if err := storage.UpdateBucketMetadata(ctx, bucket, metadata); err != nil {
+			log.Printf("Error updating bucket metadata: %v", err)
+		}
 
 		time.Sleep(5 * time.Second)
 	}
 }
+
 func PeriodicBucketScan(ctx context.Context, bucket *blob.Bucket, interval time.Duration) {
-	metadata, err := storage.GetBucketMetadata(ctx, bucket)
-	if err != nil {
-		log.Printf("Error getting bucket metadata: %v", err)
-	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("Periodic bucket scan stopped")
 			return
 		case <-ticker.C:
 			log.Println("Starting periodic bucket scan...")
 
+			metadata, err := storage.GetBucketMetadata(ctx, bucket)
+			if err != nil {
+				log.Printf("Error retrieving metadata: %v", err)
+				continue
+			}
 			log.Printf("Current metadata entries: %d", len(metadata))
 
 			log.Println("Listing bucket files...")
-			iter := bucket.List(&blob.ListOptions{})
-			updated := false
-			newFiles := 0
+			iter := bucket.List(nil)
 			for {
 				obj, err := iter.Next(ctx)
 				if err == io.EOF {
 					break
 				}
 				if err != nil {
-					log.Printf("Error listing bucket contents: %v", err)
+					log.Printf("Error listing bucket files: %v", err)
 					break
 				}
+
 				log.Printf("Found file in bucket: %s", obj.Key)
 
-				if obj.Key != storage.MetadataFileName {
-					metaData, exists := metadata[obj.Key]
-					if !exists || obj.ModTime.After(metaData.ModTime) {
-						log.Printf("New or modified file detected: %s", obj.Key)
-						metadata[obj.Key] = storage.FileMetadata{
-							ModTime:     obj.ModTime,
-							IsDeleted:   false,
-							DeletedTime: time.Time{},
-						}
-						updated = true
-						newFiles++
+				if _, exists := metadata[obj.Key]; !exists {
+					metadata[obj.Key] = storage.FileMetadata{
+						BucketModTime:    obj.ModTime,
+						LocalModTime:     time.Time{},
+						IsDeletedBucket:  false,
+						IsDeletedLocal:   false,
+						BucketDeleteTime: time.Time{},
+						LocalDeleteTime:  time.Time{},
+						LastSyncTime:     time.Now(),
+					}
+				} else {
+					metaData := metadata[obj.Key]
+					if obj.ModTime.After(metaData.BucketModTime) {
+						metaData.BucketModTime = obj.ModTime
+						metaData.IsDeletedBucket = false
+						metaData.BucketDeleteTime = time.Time{}
+						metaData.LastSyncTime = time.Now()
+						metadata[obj.Key] = metaData
 					}
 				}
 			}
 
-			if updated {
-				log.Printf("Found %d new or modified files in the bucket", newFiles)
-				log.Printf("Updating metadata file with %d entries", len(metadata))
-				if err := storage.UpdateBucketMetadata(ctx, bucket, metadata); err != nil {
-					log.Printf("Error updating bucket metadata: %v", err)
-				} else {
-					log.Println("Metadata file successfully updated with new changes")
+			// Check for deleted files
+			for key, metaData := range metadata {
+				if !metaData.IsDeletedBucket {
+					exists, _ := bucket.Exists(ctx, key)
+					if !exists {
+						metaData.IsDeletedBucket = true
+						metaData.BucketDeleteTime = time.Now()
+						metaData.LastSyncTime = time.Now()
+						metadata[key] = metaData
+						log.Printf("File %s no longer exists in bucket. Marked as deleted.", key)
+					}
 				}
-			} else {
-				log.Println("No changes detected in bucket")
+			}
+
+			if err := storage.UpdateBucketMetadata(ctx, bucket, metadata); err != nil {
+				log.Printf("Error updating metadata: %v", err)
 			}
 
 			log.Println("Periodic bucket scan completed")
@@ -253,49 +345,4 @@ func DownloadFile(ctx context.Context, bucket *blob.Bucket, key string, destPath
 
 	log.Printf("Successfully downloaded %s to %s (%d bytes written)", key, fullPath, written)
 	return nil
-}
-
-func DoThing(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket, interval time.Duration) error {
-	metadata, err := storage.GetBucketMetadata(ctx, bucket)
-	if err != nil {
-		log.Printf("Error getting bucket metadata: %v", err)
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			log.Printf("Context canceled. Exiting DoThing.")
-			return nil
-		case <-ticker.C:
-			log.Println("Starting periodic bucket scan")
-			iter := bucket.List(&blob.ListOptions{})
-			for {
-				obj, err := iter.Next(ctx)
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					log.Printf("Error listing bucket contents: %v", err)
-					break
-				}
-				log.Printf("Found file in bucket: %s", obj.Key)
-
-				if obj.Key != storage.MetadataFileName {
-					metaData, exists := metadata[obj.Key]
-					if !exists || obj.ModTime.After(metaData.ModTime) {
-						log.Printf("New or modified file detected: %s", obj.Key)
-						metadata[obj.Key] = storage.FileMetadata{
-							ModTime:     obj.ModTime,
-							IsDeleted:   false,
-							DeletedTime: time.Time{},
-							HasChanged:  true,
-						}
-					}
-				}
-			}
-		}
-	}
-
 }

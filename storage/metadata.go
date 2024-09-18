@@ -12,74 +12,64 @@ import (
 )
 
 type FileMetadata struct {
-	ModTime     time.Time `json:"mod_time"`
-	IsDeleted   bool      `json:"is_deleted"`
-	DeletedTime time.Time `json:"deleted_time"`
-	HasChanged  bool      `json:"-"`
+	BucketModTime    time.Time `json:"bucket_mod_time"`
+	LocalModTime     time.Time `json:"local_mod_time"`
+	IsDeletedBucket  bool      `json:"is_deleted_bucket"`
+	IsDeletedLocal   bool      `json:"is_deleted_local"`
+	BucketDeleteTime time.Time `json:"bucket_delete_time"`
+	LocalDeleteTime  time.Time `json:"local_delete_time"`
+	LastSyncTime     time.Time `json:"last_sync_time"`
 }
 
 type BucketMetadata map[string]FileMetadata
 
 const MetadataFileName = ".filesync_metadata.json"
 
+func GetBucketMetadata(ctx context.Context, bucket *blob.Bucket) (BucketMetadata, error) {
+	metadata := make(BucketMetadata)
+	exists, err := bucket.Exists(ctx, MetadataFileName)
+	if err != nil {
+		return nil, fmt.Errorf("error checking metadata file existence: %v", err)
+	}
+	if !exists {
+		return metadata, nil
+	}
+
+	reader, err := bucket.NewReader(ctx, MetadataFileName, nil)
+	if err != nil {
+		return nil, fmt.Errorf("error opening metadata file: %v", err)
+	}
+	defer reader.Close()
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("error reading metadata file: %v", err)
+	}
+
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil, fmt.Errorf("error unmarshaling metadata: %v", err)
+	}
+
+	return metadata, nil
+}
+
 func UpdateBucketMetadata(ctx context.Context, bucket *blob.Bucket, metadata BucketMetadata) error {
-	data, err := json.MarshalIndent(metadata, "", " ")
+	data, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal metadata: %v", err)
+		return fmt.Errorf("error marshaling metadata: %v", err)
 	}
 
-	w, err := bucket.NewWriter(ctx, MetadataFileName, nil)
+	writer, err := bucket.NewWriter(ctx, MetadataFileName, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create writer for metadata: %v", err)
+		return fmt.Errorf("error creating metadata file writer: %v", err)
 	}
-	defer w.Close()
+	defer writer.Close()
 
-	_, err = w.Write(data)
-	if err != nil {
-		return fmt.Errorf("failed to write metadata: %v", err)
+	if _, err := writer.Write(data); err != nil {
+		return fmt.Errorf("error writing metadata file: %v", err)
 	}
 
 	return nil
-}
-
-func GetBucketMetadata(ctx context.Context, bucket *blob.Bucket) (BucketMetadata, error) {
-	exists, err := bucket.Exists(ctx, MetadataFileName)
-	if err != nil {
-		log.Printf("Error checking metadata file existence: %v", err)
-		return nil, fmt.Errorf("failed to check metadata existence: %v", err)
-	}
-
-	if !exists {
-		log.Println("Metadata file does not exist. Creating new file.")
-		initialMetadata := BucketMetadata{}
-		if err := UpdateBucketMetadata(ctx, bucket, initialMetadata); err != nil {
-			log.Printf("Failed to create initial metadata: %v", err)
-			return nil, fmt.Errorf("failed to create initial metadata: %v", err)
-		}
-		log.Println("New metadata file created successfully.")
-		return initialMetadata, nil
-	}
-
-	r, err := bucket.NewReader(ctx, MetadataFileName, nil)
-	if err != nil {
-		log.Printf("Error opening metadata file: %v", err)
-		return nil, fmt.Errorf("failed to open metadata: %v", err)
-	}
-	defer r.Close()
-
-	data, err := io.ReadAll(r)
-	if err != nil {
-		log.Printf("Error reading metadata content: %v", err)
-		return nil, fmt.Errorf("failed to read metadata content: %v", err)
-	}
-
-	var Metadata BucketMetadata
-	if err := json.Unmarshal(data, &Metadata); err != nil {
-		log.Printf("Error unmarshaling metadata: %v", err)
-		return nil, fmt.Errorf("failed to unmarshal metadata: %v", err)
-	}
-	log.Println("Metadata retrieved successfully.")
-	return Metadata, nil
 }
 
 func CleanMetadata(ctx context.Context, bucket *blob.Bucket, metadata BucketMetadata) (BucketMetadata, error) {
