@@ -49,13 +49,14 @@ func main() {
 		}
 	}(bucket)
 
-	// Start periodic bucket scan
-	log.Println("Starting periodic bucket scan...")
-	go filesync.PeriodicBucketScan(ctx, bucket, 5*time.Second)
+	// Start periodic bucket scan in a separate goroutine
+	go func() {
+		filesync.PeriodicBucketScan(ctx, bucket, 5*time.Second)
+	}()
 
-	// Sync the local directory to the bucket
-	filesync.SyncDirToBucket(ctx, dir1, bucket)
-
-	// Wait indefinitely
-	select {}
+	// Run SyncDirToBucket in an infinite loop
+	for {
+		filesync.SyncDirToBucket(ctx, dir1, bucket)
+		time.Sleep(5 * time.Second) // Adjust the sleep duration as needed
+	}
 }
