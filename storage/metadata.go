@@ -4,30 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"gocloud.dev/blob"
 	"io"
 	"log"
-	"time"
-
-	"gocloud.dev/blob"
 )
 
 type FileMetadata struct {
-	BucketModTime    time.Time `json:"bucket_mod_time"`
-	LocalModTime     time.Time `json:"local_mod_time"`
-	IsDeletedBucket  bool      `json:"is_deleted_bucket"`
-	IsDeletedLocal   bool      `json:"is_deleted_local"`
-	BucketDeleteTime time.Time `json:"bucket_delete_time"`
-	LocalDeleteTime  time.Time `json:"local_delete_time"`
-	LastSyncTime     time.Time `json:"last_sync_time"`
+	ModTimeUnix    int64 `json:"mod_time_unix"`
+	IsDeleted      bool  `json:"is_deleted"`
+	DeleteTimeUnix int64 `json:"delete_time_unix"`
+	LastSyncUnix   int64 `json:"last_sync_unix"`
 }
 
-type BucketMetadata map[string]FileMetadata
+type Metadata map[string]FileMetadata
 
-const MetadataFileName = ".filesync_metadata.json"
+const (
+	LocalMetadataFileName  = ".filesync_local_metadata.json"
+	BucketMetadataFileName = ".filesync_bucket_metadata.json"
+)
 
-func GetBucketMetadata(ctx context.Context, bucket *blob.Bucket) (BucketMetadata, error) {
-	metadata := make(BucketMetadata)
-	exists, err := bucket.Exists(ctx, MetadataFileName)
+func GetMetadata(ctx context.Context, bucket *blob.Bucket, isLocal bool) (Metadata, error) {
+	metadataFileName := BucketMetadataFileName
+	if isLocal {
+		metadataFileName = LocalMetadataFileName
+	}
+
+	metadata := make(Metadata)
+	exists, err := bucket.Exists(ctx, metadataFileName)
 	if err != nil {
 		return nil, fmt.Errorf("error checking metadata file existence: %v", err)
 	}
@@ -35,7 +38,7 @@ func GetBucketMetadata(ctx context.Context, bucket *blob.Bucket) (BucketMetadata
 		return metadata, nil
 	}
 
-	reader, err := bucket.NewReader(ctx, MetadataFileName, nil)
+	reader, err := bucket.NewReader(ctx, metadataFileName, nil)
 	if err != nil {
 		return nil, fmt.Errorf("error opening metadata file: %v", err)
 	}
@@ -53,13 +56,18 @@ func GetBucketMetadata(ctx context.Context, bucket *blob.Bucket) (BucketMetadata
 	return metadata, nil
 }
 
-func UpdateBucketMetadata(ctx context.Context, bucket *blob.Bucket, metadata BucketMetadata) error {
+func UpdateMetadata(ctx context.Context, bucket *blob.Bucket, metadata Metadata, isLocal bool) error {
+	metadataFileName := BucketMetadataFileName
+	if isLocal {
+		metadataFileName = LocalMetadataFileName
+	}
+
 	data, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return fmt.Errorf("error marshaling metadata: %v", err)
 	}
 
-	writer, err := bucket.NewWriter(ctx, MetadataFileName, nil)
+	writer, err := bucket.NewWriter(ctx, metadataFileName, nil)
 	if err != nil {
 		return fmt.Errorf("error creating metadata file writer: %v", err)
 	}
@@ -72,8 +80,8 @@ func UpdateBucketMetadata(ctx context.Context, bucket *blob.Bucket, metadata Buc
 	return nil
 }
 
-func CleanMetadata(ctx context.Context, bucket *blob.Bucket, metadata BucketMetadata) (BucketMetadata, error) {
-	cleanedMetadata := make(BucketMetadata)
+func CleanMetadata(ctx context.Context, bucket *blob.Bucket, metadata Metadata, isLocal bool) (Metadata, error) {
+	cleanedMetadata := make(Metadata)
 	for key, data := range metadata {
 		exists, err := bucket.Exists(ctx, key)
 		if err != nil {
@@ -82,7 +90,7 @@ func CleanMetadata(ctx context.Context, bucket *blob.Bucket, metadata BucketMeta
 		if exists {
 			cleanedMetadata[key] = data
 		} else {
-			log.Printf("Removing %s from metadata as it no longer exists in the bucket", key)
+			log.Printf("Removing %s from metadata as it no longer exists in the %s", key, map[bool]string{true: "local directory", false: "bucket"}[isLocal])
 		}
 	}
 	return cleanedMetadata, nil
