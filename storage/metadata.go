@@ -21,14 +21,14 @@ type FileMetadata struct {
 type Metadata map[string]FileMetadata
 
 const (
-	LocalMetadataFileName  = ".filesync_local_metadata.json"
 	BucketMetadataFileName = ".filesync_bucket_metadata.json"
+	LocalMetadataFileName  = ".filesync_local_metadata.json"
 )
 
 func GetMetadata(ctx context.Context, bucket *blob.Bucket, isLocal bool) (Metadata, error) {
 	metadataFileName := BucketMetadataFileName
 	if isLocal {
-		metadataFileName = LocalMetadataFileName
+		metadataFileName = filepath.Join("test-data", "dir1", LocalMetadataFileName)
 	}
 
 	metadata := make(Metadata)
@@ -61,7 +61,7 @@ func GetMetadata(ctx context.Context, bucket *blob.Bucket, isLocal bool) (Metada
 func UpdateMetadata(ctx context.Context, bucket *blob.Bucket, metadata Metadata, isLocal bool) error {
 	metadataFileName := BucketMetadataFileName
 	if isLocal {
-		metadataFileName = LocalMetadataFileName
+		metadataFileName = filepath.Join("test-data", "dir1", LocalMetadataFileName)
 	}
 
 	data, err := json.MarshalIndent(metadata, "", "  ")
@@ -103,4 +103,14 @@ func CleanMetadata(ctx context.Context, bucket *blob.Bucket, metadata Metadata, 
 		}
 	}
 	return cleanedMetadata, nil
+}
+
+func MetadataExists(ctx context.Context, bucket *blob.Bucket, isLocal bool) bool {
+	metadataFileName := BucketMetadataFileName
+	if isLocal {
+		metadataFileName = LocalMetadataFileName
+	}
+
+	exists, _ := bucket.Exists(ctx, metadataFileName)
+	return exists
 }
