@@ -7,6 +7,8 @@ import (
 	"gocloud.dev/blob"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 )
 
 type FileMetadata struct {
@@ -67,16 +69,23 @@ func UpdateMetadata(ctx context.Context, bucket *blob.Bucket, metadata Metadata,
 		return fmt.Errorf("error marshaling metadata: %v", err)
 	}
 
-	writer, err := bucket.NewWriter(ctx, metadataFileName, nil)
-	if err != nil {
-		return fmt.Errorf("error creating metadata file writer: %v", err)
+	if isLocal {
+		// For local operations, write directly to the file system
+		dir := filepath.Dir(metadataFileName)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("error creating directory: %v", err)
+		}
+		if err := os.WriteFile(metadataFileName, data, 0644); err != nil {
+			return fmt.Errorf("error writing local metadata file: %v", err)
+		}
+	} else {
+		// For bucket operations, use the blob.Bucket interface
+		if err := bucket.WriteAll(ctx, metadataFileName, data, nil); err != nil {
+			return fmt.Errorf("error writing bucket metadata file: %v", err)
+		}
 	}
-	defer writer.Close()
 
-	if _, err := writer.Write(data); err != nil {
-		return fmt.Errorf("error writing metadata file: %v", err)
-	}
-
+	log.Printf("Updated %s metadata file (%d bytes written)", metadataFileName, len(data))
 	return nil
 }
 

@@ -2,8 +2,12 @@ package filesync
 
 import (
 	"context"
+	"crypto/md5"
+	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/AlexTLDR/FileSync/storage"
@@ -41,14 +45,26 @@ func SyncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket)
 			if !exists {
 				// File exists locally but not in bucket, upload it
 				uploadFile(ctx, dir, bucket, key, localData)
-			} else if localData.ModTimeUnix > bucketData.ModTimeUnix {
-				// Local file is newer, upload it
-				uploadFile(ctx, dir, bucket, key, localData)
-			} else if localData.ModTimeUnix < bucketData.ModTimeUnix {
-				// Bucket file is newer, download it
-				downloadFile(ctx, dir, bucket, key, bucketData)
+			} else if localData.ModTimeUnix != bucketData.ModTimeUnix {
+				// Modification times differ, compare checksums
+				localChecksum, err := calculateChecksum(ctx, dir, key)
+				if err != nil {
+					log.Printf("Error calculating local checksum for %s: %v", key, err)
+					continue
+				}
+				bucketChecksum, err := calculateChecksum(ctx, bucket, key)
+				if err != nil {
+					log.Printf("Error calculating bucket checksum for %s: %v", key, err)
+					continue
+				}
+				if localChecksum != bucketChecksum {
+					if localData.ModTimeUnix > bucketData.ModTimeUnix {
+						uploadFile(ctx, dir, bucket, key, localData)
+					} else {
+						downloadFile(ctx, dir, bucket, key, bucketData)
+					}
+				}
 			}
-			// If mod times are equal, no action needed
 		}
 
 		// Check for files in bucket that don't exist locally
@@ -76,6 +92,21 @@ func SyncDirToBucket(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket)
 	}
 }
 
+func calculateChecksum(ctx context.Context, bucket *blob.Bucket, key string) (string, error) {
+	reader, err := bucket.NewReader(ctx, key, nil)
+	if err != nil {
+		return "", err
+	}
+	defer reader.Close()
+
+	hash := md5.New()
+	if _, err := io.Copy(hash, reader); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
 func uploadFile(ctx context.Context, dir, bucket *blob.Bucket, key string, metadata storage.FileMetadata) {
 	reader, err := dir.NewReader(ctx, key, nil)
 	if err != nil {
@@ -101,27 +132,32 @@ func uploadFile(ctx context.Context, dir, bucket *blob.Bucket, key string, metad
 }
 
 func downloadFile(ctx context.Context, dir, bucket *blob.Bucket, key string, metadata storage.FileMetadata) {
-	reader, err := bucket.NewReader(ctx, key, nil)
-	if err != nil {
-		log.Printf("Error creating reader for bucket file %s: %v", key, err)
-		return
-	}
-	defer reader.Close()
+	localPath := filepath.Join("/home/alex/git/FileSync/test-data/dir1", key)
 
-	writer, err := dir.NewWriter(ctx, key, nil)
-	if err != nil {
-		log.Printf("Error creating writer for local file %s: %v", key, err)
-		return
-	}
-	defer writer.Close()
-
-	_, err = io.Copy(writer, reader)
-	if err != nil {
-		log.Printf("Error downloading file %s: %v", key, err)
+	// Check if file already exists locally with the same modification time
+	info, err := os.Stat(localPath)
+	if err == nil && info.ModTime().Unix() == metadata.ModTimeUnix {
+		log.Printf("File %s is already up to date locally", key)
 		return
 	}
 
-	log.Printf("Successfully downloaded file: %s", key)
+	data, err := bucket.ReadAll(ctx, key)
+	if err != nil {
+		log.Printf("Error reading bucket file %s: %v", key, err)
+		return
+	}
+
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		log.Printf("Error creating directory for file %s: %v", key, err)
+		return
+	}
+
+	if err := os.WriteFile(localPath, data, 0644); err != nil {
+		log.Printf("Error writing local file %s: %v", key, err)
+		return
+	}
+
+	log.Printf("Successfully downloaded file: %s (%d bytes)", key, len(data))
 }
 
 func handleDeletions(ctx context.Context, dir, bucket *blob.Bucket, localMetadata, bucketMetadata storage.Metadata) {
