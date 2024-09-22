@@ -76,19 +76,25 @@ func UpdateMetadata(ctx context.Context, bucket *blob.Bucket, metadata Metadata,
 			return fmt.Errorf("error creating directory: %v", err)
 		}
 		if err := os.WriteFile(metadataFileName, data, 0644); err != nil {
-			return fmt.Errorf("error writing local metadata file: %v", err)
+			return fmt.Errorf("error writing metadata file: %v", err)
 		}
-	} else {
-		// For bucket operations, use the blob.Bucket interface
-		if err := bucket.WriteAll(ctx, metadataFileName, data, nil); err != nil {
-			return fmt.Errorf("error writing bucket metadata file: %v", err)
-		}
+		log.Printf("Updated %s metadata file (%d bytes written)", metadataFileName, len(data))
+		return nil
+	}
+
+	writer, err := bucket.NewWriter(ctx, metadataFileName, nil)
+	if err != nil {
+		return fmt.Errorf("error creating writer for metadata file: %v", err)
+	}
+	defer writer.Close()
+
+	if _, err := writer.Write(data); err != nil {
+		return fmt.Errorf("error writing metadata file: %v", err)
 	}
 
 	log.Printf("Updated %s metadata file (%d bytes written)", metadataFileName, len(data))
 	return nil
 }
-
 func CleanMetadata(ctx context.Context, bucket *blob.Bucket, metadata Metadata, isLocal bool) (Metadata, error) {
 	cleanedMetadata := make(Metadata)
 	for key, data := range metadata {

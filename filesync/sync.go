@@ -59,7 +59,6 @@ func updateBucketMetadata(ctx context.Context, bucket *blob.Bucket) storage.Meta
 
 	return bucketMetadata
 }
-
 func reconcileMetadata(ctx context.Context, dir *blob.Bucket, bucket *blob.Bucket, localMetadata, bucketMetadata storage.Metadata) {
 	for key, localData := range localMetadata {
 		bucketData, existsInBucket := bucketMetadata[key]
@@ -212,7 +211,6 @@ func uploadFile(ctx context.Context, dir, bucket *blob.Bucket, key string, metad
 
 	log.Printf("Successfully uploaded file: %s", key)
 }
-
 func downloadFile(ctx context.Context, dir, bucket *blob.Bucket, key string, metadata storage.FileMetadata) {
 	localPath := filepath.Join("/home/alex/git/FileSync/test-data/dir1", key)
 
@@ -241,7 +239,6 @@ func downloadFile(ctx context.Context, dir, bucket *blob.Bucket, key string, met
 
 	log.Printf("Successfully downloaded file: %s (%d bytes)", key, len(data))
 }
-
 func handleDeletions(ctx context.Context, dir, bucket *blob.Bucket, localMetadata, bucketMetadata storage.Metadata) {
 	for key, localData := range localMetadata {
 		bucketData, exists := bucketMetadata[key]
@@ -269,7 +266,6 @@ func handleDeletions(ctx context.Context, dir, bucket *blob.Bucket, localMetadat
 		}
 	}
 }
-
 func ListFiles(ctx context.Context, bucket *blob.Bucket, files map[string]*blob.ListObject) error {
 	iter := bucket.List(nil)
 	for {
@@ -280,17 +276,11 @@ func ListFiles(ctx context.Context, bucket *blob.Bucket, files map[string]*blob.
 		if err != nil {
 			return err
 		}
-		// Create a new reader for each object to ensure it's properly closed
-		reader, err := bucket.NewReader(ctx, obj.Key, nil)
-		if err != nil {
-			return err
-		}
-		reader.Close() // Close the reader immediately after creation
+		// No need to create a reader here, just add the object to the map
 		files[obj.Key] = obj
 	}
 	return nil
 }
-
 func PeriodicBucketScan(ctx context.Context, bucket *blob.Bucket, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
