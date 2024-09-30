@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const metadataFileName = "__metadata.json"
@@ -43,7 +44,9 @@ func SyncFiles(ctx context.Context, localDir string, bucket *blob.Bucket) error 
 }
 
 func syncLocalToBucket(ctx context.Context, localDir string, bucket *blob.Bucket, bucketMetadata *metadata.BucketMetadata) error {
-	return filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
+	localFiles := make(map[string]bool)
+
+	err := filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			log.Printf("Error accessing path %s: %v", path, err)
 			return err
@@ -62,6 +65,8 @@ func syncLocalToBucket(ctx context.Context, localDir string, bucket *blob.Bucket
 		if relPath == metadataFileName {
 			return nil
 		}
+
+		localFiles[relPath] = true
 
 		hash, err := calculateFileHash(path)
 		if err != nil {
@@ -83,9 +88,31 @@ func syncLocalToBucket(ctx context.Context, localDir string, bucket *blob.Bucket
 		metadata.UpdateFileMetadata(bucketMetadata, relPath, true, info.ModTime(), hash, false)
 		return nil
 	})
+
+	if err != nil {
+		return err
+	}
+
+	// Handle local deletions
+	for filename, fileMetadata := range bucketMetadata.Files {
+		if !localFiles[filename] && !fileMetadata.Local.Deleted {
+			log.Printf("Deleting file from bucket: %s", filename)
+			err := bucket.Delete(ctx, filename)
+			if err != nil {
+				log.Printf("Error deleting file from bucket %s: %v", filename, err)
+				return err
+			}
+			metadata.UpdateFileMetadata(bucketMetadata, filename, true, time.Now(), "", true)
+			metadata.UpdateFileMetadata(bucketMetadata, filename, false, time.Now(), "", true)
+		}
+	}
+
+	return nil
 }
 
 func syncBucketToLocal(ctx context.Context, localDir string, bucket *blob.Bucket, bucketMetadata *metadata.BucketMetadata) error {
+	bucketFiles := make(map[string]bool)
+
 	iter := bucket.List(nil)
 	for {
 		obj, err := iter.Next(ctx)
@@ -101,11 +128,22 @@ func syncBucketToLocal(ctx context.Context, localDir string, bucket *blob.Bucket
 			continue
 		}
 
+		bucketFiles[obj.Key] = true
+
 		localPath := filepath.Join(localDir, obj.Key)
 		fileMetadata, exists := bucketMetadata.Files[obj.Key]
 
-		if !exists || fileMetadata.Local.Hash != fileMetadata.Bucket.Hash {
-			log.Printf("Downloading file: %s", obj.Key)
+		localInfo, err := os.Stat(localPath)
+		if err != nil && !os.IsNotExist(err) {
+			log.Printf("Error getting local file info for %s: %v", localPath, err)
+			return err
+		}
+
+		bucketNewer := !exists || obj.ModTime.After(fileMetadata.Local.CreationTime)
+		hashDifferent := !exists || fileMetadata.Local.Hash != fileMetadata.Bucket.Hash
+
+		if bucketNewer || (hashDifferent && obj.ModTime.After(localInfo.ModTime())) {
+			log.Printf("Downloading newer version of file: %s", obj.Key)
 			err = downloadFile(ctx, bucket, localPath, obj.Key)
 			if err != nil {
 				log.Printf("Error downloading file %s: %v", obj.Key, err)
@@ -123,6 +161,21 @@ func syncBucketToLocal(ctx context.Context, localDir string, bucket *blob.Bucket
 			}
 			metadata.UpdateFileMetadata(bucketMetadata, obj.Key, true, fileInfo.ModTime(), hash, false)
 			metadata.UpdateFileMetadata(bucketMetadata, obj.Key, false, obj.ModTime, hash, false)
+		}
+	}
+
+	// Handle deletions
+	for filename, fileMetadata := range bucketMetadata.Files {
+		if !bucketFiles[filename] && !fileMetadata.Local.Deleted {
+			localPath := filepath.Join(localDir, filename)
+			log.Printf("Deleting local file: %s", filename)
+			err := os.Remove(localPath)
+			if err != nil && !os.IsNotExist(err) {
+				log.Printf("Error deleting local file %s: %v", filename, err)
+				return err
+			}
+			metadata.UpdateFileMetadata(bucketMetadata, filename, true, time.Now(), "", true)
+			metadata.UpdateFileMetadata(bucketMetadata, filename, false, time.Now(), "", true)
 		}
 	}
 
