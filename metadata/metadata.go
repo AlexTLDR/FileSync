@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"gocloud.dev/blob"
-	"gocloud.dev/gcerrors"
 	"time"
 )
+
+const MetadataFileName = "__metadata.json"
 
 type FileStatus struct {
 	CreationTime time.Time `json:"creationTime"`
@@ -28,16 +29,13 @@ func SaveMetadataToBucket(ctx context.Context, bucket *blob.Bucket, metadata Buc
 	if err != nil {
 		return err
 	}
-	return bucket.WriteAll(ctx, "metadata.json", data, nil)
+	return bucket.WriteAll(ctx, MetadataFileName, data, nil)
 }
 
 func LoadMetadataFromBucket(ctx context.Context, bucket *blob.Bucket) (BucketMetadata, error) {
-	data, err := bucket.ReadAll(ctx, "metadata.json")
+	data, err := bucket.ReadAll(ctx, MetadataFileName)
 	if err != nil {
-		if gcerrors.Code(err) == gcerrors.NotFound {
-			return BucketMetadata{Files: make(map[string]FileMetadata)}, nil
-		}
-		return BucketMetadata{}, err
+		return BucketMetadata{Files: make(map[string]FileMetadata)}, nil
 	}
 
 	var metadata BucketMetadata
@@ -68,17 +66,4 @@ func UpdateFileMetadata(metadata *BucketMetadata, filename string, isLocal bool,
 	}
 
 	metadata.Files[filename] = fileMetadata
-}
-
-func ShouldSyncFile(metadata FileMetadata) (bool, bool) {
-	if metadata.Local.Deleted && !metadata.Bucket.Deleted {
-		return true, true // Delete from bucket
-	}
-	if !metadata.Local.Deleted && metadata.Bucket.Deleted {
-		return true, false // Restore locally
-	}
-	if metadata.Local.Hash != metadata.Bucket.Hash {
-		return true, metadata.Local.CreationTime.After(metadata.Bucket.CreationTime)
-	}
-	return false, false
 }

@@ -11,24 +11,28 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"time"
 )
+
+const metadataFileName = "__metadata.json"
 
 func SyncFiles(ctx context.Context, localDir string, bucket *blob.Bucket) error {
 	log.Println("Starting file synchronization")
 	bucketMetadata, err := metadata.LoadMetadataFromBucket(ctx, bucket)
 	if err != nil {
-		log.Printf("Error loading bucket metadata: %v", err)
-		return err
+		if gcerrors.Code(err) == gcerrors.NotFound {
+			log.Println("No metadata file found in bucket, creating a new one")
+			bucketMetadata = metadata.BucketMetadata{Files: make(map[string]metadata.FileMetadata)}
+		} else {
+			log.Printf("Error loading bucket metadata: %v", err)
+			return err
+		}
 	}
 
-	// Sync local files to bucket
 	err = syncLocalToBucket(ctx, localDir, bucket, &bucketMetadata)
 	if err != nil {
 		return err
 	}
 
-	// Sync bucket files to local
 	err = syncBucketToLocal(ctx, localDir, bucket, &bucketMetadata)
 	if err != nil {
 		return err
@@ -55,29 +59,28 @@ func syncLocalToBucket(ctx context.Context, localDir string, bucket *blob.Bucket
 			return err
 		}
 
+		if relPath == metadataFileName {
+			return nil
+		}
+
 		hash, err := calculateFileHash(path)
 		if err != nil {
 			log.Printf("Error calculating hash for %s: %v", path, err)
 			return err
 		}
 
-		metadata.UpdateFileMetadata(bucketMetadata, relPath, true, info.ModTime(), hash, false)
-
-		shouldSync, uploadToBucket := metadata.ShouldSyncFile(bucketMetadata.Files[relPath])
-		if shouldSync {
-			if uploadToBucket {
-				log.Printf("Uploading file: %s", relPath)
-				err = uploadFile(ctx, bucket, path, relPath)
-			} else {
-				log.Printf("Downloading file: %s", relPath)
-				err = downloadFile(ctx, bucket, path, relPath)
-			}
+		fileMetadata, exists := bucketMetadata.Files[relPath]
+		if !exists || fileMetadata.Bucket.Hash != hash {
+			log.Printf("Uploading file: %s", relPath)
+			err = uploadFile(ctx, bucket, path, relPath)
 			if err != nil {
-				log.Printf("Error syncing file %s: %v", relPath, err)
+				log.Printf("Error uploading file %s: %v", relPath, err)
 				return err
 			}
+			metadata.UpdateFileMetadata(bucketMetadata, relPath, false, info.ModTime(), hash, false)
 		}
 
+		metadata.UpdateFileMetadata(bucketMetadata, relPath, true, info.ModTime(), hash, false)
 		return nil
 	})
 }
@@ -94,9 +97,15 @@ func syncBucketToLocal(ctx context.Context, localDir string, bucket *blob.Bucket
 			return err
 		}
 
+		if obj.Key == metadataFileName {
+			continue
+		}
+
 		localPath := filepath.Join(localDir, obj.Key)
-		if _, err := os.Stat(localPath); os.IsNotExist(err) {
-			log.Printf("Downloading missing file: %s", obj.Key)
+		fileMetadata, exists := bucketMetadata.Files[obj.Key]
+
+		if !exists || fileMetadata.Local.Hash != fileMetadata.Bucket.Hash {
+			log.Printf("Downloading file: %s", obj.Key)
 			err = downloadFile(ctx, bucket, localPath, obj.Key)
 			if err != nil {
 				log.Printf("Error downloading file %s: %v", obj.Key, err)
@@ -113,23 +122,7 @@ func syncBucketToLocal(ctx context.Context, localDir string, bucket *blob.Bucket
 				return err
 			}
 			metadata.UpdateFileMetadata(bucketMetadata, obj.Key, true, fileInfo.ModTime(), hash, false)
-		}
-	}
-
-	// Handle deletions
-	for filename := range bucketMetadata.Files {
-		localPath := filepath.Join(localDir, filename)
-		_, err := bucket.Attributes(ctx, filename)
-		if err != nil {
-			if gcerrors.Code(err) == gcerrors.NotFound {
-				log.Printf("File deleted from bucket, deleting locally: %s", filename)
-				os.Remove(localPath)
-				metadata.UpdateFileMetadata(bucketMetadata, filename, true, time.Now(), "", true)
-				metadata.UpdateFileMetadata(bucketMetadata, filename, false, time.Now(), "", true)
-			} else {
-				log.Printf("Error checking bucket file %s: %v", filename, err)
-				return err
-			}
+			metadata.UpdateFileMetadata(bucketMetadata, obj.Key, false, obj.ModTime, hash, false)
 		}
 	}
 
