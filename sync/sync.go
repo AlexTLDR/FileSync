@@ -3,7 +3,7 @@ package sync
 import (
 	"context"
 	"crypto/md5"
-	"encoding/hex"
+	"fmt"
 	"github.com/AlexTLDR/FileSync/metadata"
 	"gocloud.dev/blob"
 	"gocloud.dev/gcerrors"
@@ -111,9 +111,10 @@ func syncLocalToBucket(ctx context.Context, localDir string, bucket *blob.Bucket
 }
 
 func syncBucketToLocal(ctx context.Context, localDir string, bucket *blob.Bucket, bucketMetadata *metadata.BucketMetadata) error {
+	log.Println("Syncing bucket to local")
 	bucketFiles := make(map[string]bool)
 
-	iter := bucket.List(nil)
+	iter := bucket.List(&blob.ListOptions{Prefix: ""})
 	for {
 		obj, err := iter.Next(ctx)
 		if err == io.EOF {
@@ -124,58 +125,81 @@ func syncBucketToLocal(ctx context.Context, localDir string, bucket *blob.Bucket
 			return err
 		}
 
-		if obj.Key == metadataFileName {
+		if obj.Key == metadata.MetadataFileName {
 			continue
 		}
 
 		bucketFiles[obj.Key] = true
 
 		localPath := filepath.Join(localDir, obj.Key)
-		fileMetadata, exists := bucketMetadata.Files[obj.Key]
-
 		localInfo, err := os.Stat(localPath)
 		if err != nil && !os.IsNotExist(err) {
-			log.Printf("Error getting local file info for %s: %v", localPath, err)
+			log.Printf("Error checking local file %s: %v", localPath, err)
 			return err
 		}
 
-		bucketNewer := !exists || obj.ModTime.After(fileMetadata.Local.CreationTime)
-		hashDifferent := !exists || fileMetadata.Local.Hash != fileMetadata.Bucket.Hash
-
-		if bucketNewer || (hashDifferent && obj.ModTime.After(localInfo.ModTime())) {
-			log.Printf("Downloading newer version of file: %s", obj.Key)
+		if os.IsNotExist(err) {
+			log.Printf("Downloading new file: %s", obj.Key)
 			err = downloadFile(ctx, bucket, localPath, obj.Key)
 			if err != nil {
 				log.Printf("Error downloading file %s: %v", obj.Key, err)
 				return err
 			}
-			fileInfo, err := os.Stat(localPath)
-			if err != nil {
-				log.Printf("Error getting file info for %s: %v", localPath, err)
-				return err
-			}
-			hash, err := calculateFileHash(localPath)
+		} else if !localInfo.IsDir() {
+			localHash, err := calculateFileHash(localPath)
 			if err != nil {
 				log.Printf("Error calculating hash for %s: %v", localPath, err)
 				return err
 			}
-			metadata.UpdateFileMetadata(bucketMetadata, obj.Key, true, fileInfo.ModTime(), hash, false)
-			metadata.UpdateFileMetadata(bucketMetadata, obj.Key, false, obj.ModTime, hash, false)
+
+			bucketHash, err := calculateBucketFileHash(ctx, bucket, obj.Key)
+			if err != nil {
+				log.Printf("Error calculating hash for bucket file %s: %v", obj.Key, err)
+				return err
+			}
+
+			if bucketHash != localHash {
+				log.Printf("Downloading updated file: %s", obj.Key)
+				err = downloadFile(ctx, bucket, localPath, obj.Key)
+				if err != nil {
+					log.Printf("Error downloading file %s: %v", obj.Key, err)
+					return err
+				}
+				metadata.UpdateFileMetadata(bucketMetadata, obj.Key, true, time.Now(), bucketHash, false)
+			}
 		}
 	}
 
-	// Handle deletions
-	for filename, fileMetadata := range bucketMetadata.Files {
-		if !bucketFiles[filename] && !fileMetadata.Local.Deleted {
-			localPath := filepath.Join(localDir, filename)
-			log.Printf("Deleting local file: %s", filename)
-			err := os.Remove(localPath)
-			if err != nil && !os.IsNotExist(err) {
-				log.Printf("Error deleting local file %s: %v", filename, err)
+	err := filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		relPath, err := filepath.Rel(localDir, path)
+		if err != nil {
+			return err
+		}
+		if !bucketFiles[relPath] {
+			log.Printf("Deleting local file not in bucket: %s", relPath)
+			err = os.Remove(path)
+			if err != nil {
+				log.Printf("Error deleting local file %s: %v", relPath, err)
 				return err
 			}
-			metadata.UpdateFileMetadata(bucketMetadata, filename, true, time.Now(), "", true)
-			metadata.UpdateFileMetadata(bucketMetadata, filename, false, time.Now(), "", true)
+			delete(bucketMetadata.Files, relPath)
+		}
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	for relPath := range bucketMetadata.Files {
+		if !bucketFiles[relPath] {
+			delete(bucketMetadata.Files, relPath)
 		}
 	}
 
@@ -194,7 +218,22 @@ func calculateFileHash(filePath string) (string, error) {
 		return "", err
 	}
 
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func calculateBucketFileHash(ctx context.Context, bucket *blob.Bucket, key string) (string, error) {
+	reader, err := bucket.NewReader(ctx, key, nil)
+	if err != nil {
+		return "", err
+	}
+	defer reader.Close()
+
+	hash := md5.New()
+	if _, err := io.Copy(hash, reader); err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 func uploadFile(ctx context.Context, bucket *blob.Bucket, localPath, remotePath string) error {
