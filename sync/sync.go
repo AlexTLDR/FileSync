@@ -40,6 +40,10 @@ func SyncFiles(ctx context.Context, localDir string, bucket *blob.Bucket) error 
 	}
 
 	log.Println("Saving updated metadata to bucket")
+	err = cleanupEmptyFolders(ctx, localDir, bucket)
+	if err != nil {
+		return fmt.Errorf("error cleaning up empty folders: %v", err)
+	}
 	return metadata.SaveMetadataToBucket(ctx, bucket, bucketMetadata)
 }
 
@@ -252,4 +256,109 @@ func downloadFile(ctx context.Context, bucket *blob.Bucket, localPath, remotePat
 	}
 
 	return os.WriteFile(localPath, data, 0644)
+}
+
+// Folder handling logic
+
+func cleanupEmptyFolders(ctx context.Context, localDir string, bucket *blob.Bucket) error {
+	// Clean up local empty folders
+	err := filepath.Walk(localDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			return nil
+		}
+		empty, err := isDirEmpty(path)
+		if err != nil {
+			return err
+		}
+		if empty {
+			relPath, err := filepath.Rel(localDir, path)
+			if err != nil {
+				return err
+			}
+			exists, err := folderExistsInBucket(ctx, bucket, relPath)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				if err := os.Remove(path); err != nil {
+					return err
+				}
+				fmt.Printf("Deleted empty local folder: %s\n", path)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	// Clean up bucket empty folders
+	iter := bucket.List(&blob.ListOptions{Delimiter: "/"})
+	for {
+		obj, err := iter.Next(ctx)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if obj.IsDir {
+			empty, err := isBucketFolderEmpty(ctx, bucket, obj.Key)
+			if err != nil {
+				return err
+			}
+			if empty {
+				localPath := filepath.Join(localDir, obj.Key)
+				if _, err := os.Stat(localPath); os.IsNotExist(err) {
+					if err := bucket.Delete(ctx, obj.Key); err != nil {
+						return err
+					}
+					fmt.Printf("Deleted empty bucket folder: %s\n", obj.Key)
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
+func isDirEmpty(path string) (bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	_, err = f.Readdirnames(1)
+	if err == io.EOF {
+		return true, nil
+	}
+	return false, err
+}
+
+func folderExistsInBucket(ctx context.Context, bucket *blob.Bucket, path string) (bool, error) {
+	iter := bucket.List(&blob.ListOptions{Prefix: path + "/"})
+	_, err := iter.Next(ctx)
+	if err == io.EOF {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func isBucketFolderEmpty(ctx context.Context, bucket *blob.Bucket, prefix string) (bool, error) {
+	iter := bucket.List(&blob.ListOptions{Prefix: prefix})
+	_, err := iter.Next(ctx)
+	if err == io.EOF {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return false, nil
 }
