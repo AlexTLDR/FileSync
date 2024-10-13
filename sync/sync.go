@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"fmt"
+	"github.com/AlexTLDR/FileSync/frontend"
 	"github.com/AlexTLDR/FileSync/metadata"
 	"gocloud.dev/blob"
 	"gocloud.dev/gcerrors"
@@ -267,6 +268,10 @@ func cleanupEmptyFolders(ctx context.Context, localDir string, bucket *blob.Buck
 			return err
 		}
 		if !info.IsDir() {
+			return nil
+		}
+		// Skip the main sync folder
+		if path == frontend.Dir {
 			return nil
 		}
 		empty, err := isDirEmpty(path)
